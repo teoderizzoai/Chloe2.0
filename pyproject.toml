@@ -13,6 +13,8 @@ dependencies = [
     "prometheus-client",
     "httpx",
     "python-ulid",
+    "PyNaCl",
+    "cryptography",
     "hypothesis",
     "pytest",
     "pytest-asyncio",

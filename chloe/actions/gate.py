@@ -45,6 +45,17 @@ async def submit(action: Action) -> ActionResult:
         log.info("gate_budget_exceeded", action_id=action.id)
         return ActionResult(suppressed=True, reason="budget_exceeded", action_id=action.id)
 
+    # 2b. PII filter for web_search
+    pii_blocked, pii_reason = _check_pii_filter(action)
+    if pii_blocked:
+        action.state = "self_aborted"
+        await audit.append(action)
+        await _store_pii_refusal_memory(action, pii_reason)
+        record_action(action.tool, action.verb, "self_aborted")
+        record_held_back("pii_filter")
+        log.info("gate_pii_blocked", action_id=action.id, reason=pii_reason)
+        return ActionResult(suppressed=True, reason="pii_filter", action_id=action.id)
+
     # 3. Deliberation stub (always proceeds) — D-01
 
     # 4. Auth dispatch
@@ -93,6 +104,33 @@ async def _execute_and_record(action: Action) -> ActionResult:
         action_id=action.id,
         error=action.error,
     )
+
+
+def _check_pii_filter(action: Action) -> tuple[bool, str]:
+    if action.tool != "web_search" or action.verb != "search":
+        return False, ""
+    try:
+        from chloe.tools.web_search import _load_persons, sanitize
+        query = action.args.get("query", "")
+        persons = _load_persons()
+        if not sanitize(query, persons):
+            return True, f"PII detected in web_search query: '{query[:40]}'"
+    except Exception as e:
+        log.warning("pii_filter_error", error=str(e))
+    return False, ""
+
+
+async def _store_pii_refusal_memory(action: Action, reason: str) -> None:
+    conn = get_connection()
+    text = f"I almost searched for someone online. I stopped myself. Query hint: {action.args.get('query', '')[:20]}..."
+    conn.execute(
+        """
+        INSERT INTO memories (kind, text, source, source_ref, tags, salience, confidence)
+        VALUES ('episodic', ?, 'action', ?, '["held_back","refusal"]', 0.6, 1.0)
+        """,
+        (text, action.id),
+    )
+    conn.commit()
 
 
 async def _store_held_back_memory(action: Action, reason: str) -> None:

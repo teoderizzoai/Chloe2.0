@@ -52,6 +52,33 @@ All 6 gate unit tests pass, covering: free pass-through, leash suppression, DB s
 
 ---
 
+## 2026-05-05 — A-09 · Outreach wired through the gate
+
+### What was built
+
+**`chloe/chloe.py`** — `ChloeCore` stub. `_send_autonomous_outreach(person_id, message)` is the 2.0 migration of the 1.0 pattern: instead of calling `self.on_message(msg, target_id)` directly, it constructs an `Action(tool="messages", verb="send_text", authorization="kinetic")` and calls `await gate.submit(action)`. There is now exactly one path by which Chloe can send a message: through the gate.
+
+### 1.0 audit
+
+Grep of the 1.0 codebase (`/run/media/teo-derizzo/HDD/Chloe/`) identified three `self.on_message(...)` call sites:
+- `chloe.py:1952` — activity-based autonomous outreach → **replaced by gate pattern**
+- `chloe.py:2047` — `_send_autonomous_outreach()` standalone → **replaced by gate pattern**
+- `chloe.py:2392` — reply to queued pending message → **kept as-is** (reactive, not initiative)
+
+### Tests
+
+**`tests/unit/test_no_direct_discord_send.py`**
+- `test_discord_send_only_called_from_messages_tool` — AST walk of all `chloe/` files; asserts no `send_dm` or `channel.send` outside `tools/messages.py` and `discord_bot.py`.
+- `test_no_direct_discord_send_in_chloe_py` — asserts `gate.submit` is present in `chloe.py` and `self.on_message` is absent.
+
+**`tests/integration/test_outreach_via_gate.py`**
+- `test_autonomous_outreach_creates_action_row` — calls `_send_autonomous_outreach` end-to-end; verifies `actions` table row has `state="executed"` and the mock send callback received the message.
+- `test_gate_suppressed_outreach_not_sent` — lowers `auth_ceiling` to `"intimate"`; verifies outreach is suppressed (`state="suppressed_by_leash"`) and nothing is sent.
+
+All 65 tests pass.
+
+---
+
 ## 2026-05-05 — A-10 · `tools/web_search.py` — Brave Search API
 
 ### What was built
@@ -131,27 +158,153 @@ All 96 tests pass.
 
 ---
 
-## 2026-05-05 — A-09 · Outreach wired through the gate
+## 2026-05-05 — A-13 · Audit feed tab in admin dashboard
 
 ### What was built
 
-**`chloe/chloe.py`** — `ChloeCore` stub. `_send_autonomous_outreach(person_id, message)` is the 2.0 migration of the 1.0 pattern: instead of calling `self.on_message(msg, target_id)` directly, it constructs an `Action(tool="messages", verb="send_text", authorization="kinetic")` and calls `await gate.submit(action)`. There is now exactly one path by which Chloe can send a message: through the gate.
+**`chloe/admin/api.py`** — Two new routes on `admin_router`:
 
-### 1.0 audit
+- `GET /admin/audit` — returns the last N actions (default 200, max 500) as JSON: `{count, actions[]}`. Each action object carries `id`, `tool`, `verb`, `intent`, `preview`, `state`, `authorization`, `proposed_at`, `cost_usd`, and `error`.
+- `GET /admin/audit/ui` — serves a minimal single-file HTML page (monospace, dark theme) that calls `/admin/audit?limit=200` on load and every 5 seconds via `setInterval`. State values are colour-coded: green for `executed`, amber for self-aborts and leash suppressions, red for denials/failures, blue for `awaiting_confirmation`.
 
-Grep of the 1.0 codebase (`/run/media/teo-derizzo/HDD/Chloe/`) identified three `self.on_message(...)` call sites:
-- `chloe.py:1952` — activity-based autonomous outreach → **replaced by gate pattern**
-- `chloe.py:2047` — `_send_autonomous_outreach()` standalone → **replaced by gate pattern**
-- `chloe.py:2392` — reply to queued pending message → **kept as-is** (reactive, not initiative)
+No backend dependencies beyond `audit.recent(n)` (A-03) which was already implemented.
+
+### Tests — `tests/unit/test_admin_audit.py`
+
+6 tests covering: endpoint returns 200, JSON has `count` and `actions` fields, action appended via `audit.append` appears in response, all required fields present on each item, `/admin/audit/ui` returns HTML, `limit` query param respected.
+
+All 102 tests pass.
+
+---
+
+## 2026-05-05 — A-14 · Phase A integration test: all outreach in `actions`
+
+### What was built
+
+**`tests/integration/test_phase_a_acceptance.py`** — Phase A gate test. Replays 10 scripted events (4 × `messages.send_text`, 6 × `notes` verbs) through the real gate against a temp SQLite DB:
+- Asserts every event has a row in `actions`.
+- Asserts zero rows with `state="proposed"` (all resolved).
+- Asserts `feed_text(10)` is non-empty and mentions at least one tool name.
+- Second test: asserts the count of mock sends equals the number of scripted `messages` events (4).
+
+**`tests/unit/test_no_bypass_gate.py`** — Static analysis gate test. Text-searches all `chloe/` Python files for `send_dm(`, `channel.send(`, and other direct Discord send patterns. Allowlist: `tools/messages.py` and `discord_bot.py`. A second function asserts `chloe.py` references `gate.submit` or `gate import`.
+
+### Implementation note
+
+The integration test uses `monkeypatch.setattr("chloe.actions.gate.get_registry", lambda: registry)` to inject a `ToolRegistry` wired with a `mock_send` callback and an in-temp-dir `NotesTool`, keeping the test fully self-contained without touching real filesystem paths or network.
 
 ### Tests
 
-**`tests/unit/test_no_direct_discord_send.py`**
-- `test_discord_send_only_called_from_messages_tool` — AST walk of all `chloe/` files; asserts no `send_dm` or `channel.send` outside `tools/messages.py` and `discord_bot.py`.
-- `test_no_direct_discord_send_in_chloe_py` — asserts `gate.submit` is present in `chloe.py` and `self.on_message` is absent.
+4 tests (2 integration, 2 unit). All 106 tests pass. Phase A is complete.
 
-**`tests/integration/test_outreach_via_gate.py`**
-- `test_autonomous_outreach_creates_action_row` — calls `_send_autonomous_outreach` end-to-end; verifies `actions` table row has `state="executed"` and the mock send callback received the message.
-- `test_gate_suppressed_outreach_not_sent` — lowers `auth_ceiling` to `"intimate"`; verifies outreach is suppressed (`state="suppressed_by_leash"`) and nothing is sent.
+### What's next
 
-All 65 tests pass.
+**B-series** — LLM integration: tick loop, tool-call parsing, real deliberation (D-01).
+
+---
+
+## 2026-05-05 — B-04 through B-10 · Read tools, chat context, cache, PII gate
+
+Phase B is complete. The three read tools are wired through the gate, the chat path includes the audit feed, and the PII filter is elevated to gate level.
+
+### What was built
+
+**B-04 · `tools/spotify.py`**
+`SpotifyTool` with two read verbs (`show_currently_playing`, `show_recent_listens`), both `intimate` auth. Uses `httpx` with the stored Spotify token; handles 401 by calling `oauth_tokens.refresh("spotify")` and retrying once.
+
+**B-05 · `tools/gmail.py`**
+`GmailTool` with four verbs (`read_recent`, `read_thread`, `search`, `summarize_inbox`), all `intimate`. `read_recent` fetches metadata for the last N messages. `summarize_inbox` calls `GeminiClient.flash()` (stubbed until F-05). 401 triggers `oauth_tokens.refresh("google")`.
+
+**B-06 · `tools/calendar.py`**
+`CalendarTool` with `read_today`, `read_week`, and `find_free_slot`. The free-slot finder scans for gaps between busy intervals, working in the configured timezone (`chloe_timezone` on `Settings`, defaults to `"UTC"`). All verbs `intimate`.
+
+**B-07 · `channels/chat_api.py`**
+`build_dynamic_suffix(person_id)` assembles the per-call dynamic system suffix: `## Recent actions` (from `audit.feed_text`) and `## Current affect` (from the KV `mood_label` key). Returns a non-empty string even with an empty audit feed. `chloe/llm/prompts/chat_system.md` documents the block structure for prompt engineers.
+
+**B-08 · `admin/api.py` + `llm/gemini.py`**
+`GET /admin/cache/status` returns `{cache_name, active, refresh_interval_seconds, ttl_seconds}`. `POST /admin/cache/reset` triggers a cache refresh. `GeminiClient` and `get_cache_name()` stubbed in `llm/gemini.py` pending F-07. `registry.describe_static()` (already on the registry) will be included in cached content when F-07 lands.
+
+**B-09 · Gate-level PII filter + `character_prefix.md`**
+`_check_pii_filter(action)` in `gate.py` intercepts any `web_search.search` action whose query matches a person name, alias, or work domain from the `persons` table. Blocked queries get `state="self_aborted"`, a memory row with tags `["held_back","refusal"]`, and a `record_held_back("pii_filter")` metric. The gate check fires before the tool is called — Brave never sees the query. `chloe/llm/prompts/character_prefix.md` enumerates the five hard limits.
+
+**B-10 · Phase B acceptance test — `tests/integration/test_phase_b_acceptance.py`**
+Three tests: (1) Spotify + Gmail + Calendar reads through the real gate → all three `actions` rows have `authorization="intimate"` and `state="executed"`, zero kinetic rows; (2) `build_dynamic_suffix` after a Spotify read contains the tool name; (3) PII-blocked query → zero Brave calls, memory row with `"refusal"` tag.
+
+### Test coverage
+
+29 new tests across 6 unit files and 1 integration file. All 151 tests pass. Phase B complete.
+
+### What's next
+
+**C-series** — Confirmation flow for `kinetic-sensitive` actions.
+**D-series** — Real deliberation replacing the gate stub.
+**F-series** — GeminiClient, caching, loop tick.
+
+---
+
+## 2026-05-05 — B-03 · Admin OAuth flow for Google (Gmail + Calendar)
+
+### What was built
+
+**`chloe/admin/api.py`** — Two new admin endpoints added to the existing `admin_router`:
+
+- `GET /admin/oauth/google/start` — builds the Google authorization URL with scopes for `openid`, `userinfo.profile`, `gmail.readonly`, `gmail.modify`, and `calendar.events`. Returns a redirect. Returns HTTP 500 if `GOOGLE_CLIENT_ID` is not configured. Uses `urllib.parse.urlencode` with `quote_via=quote` so spaces in the scope list are encoded as `%20`.
+- `GET /admin/oauth/google/callback` — receives the authorization code, exchanges it for tokens via `https://oauth2.googleapis.com/token`, stores the encrypted token via `store_token("google", …)` (B-01), then fetches the user's display name from `/oauth2/v3/userinfo` and renders a success page. Errors return appropriate 4xx/5xx HTML responses.
+
+`access_type=offline` and `prompt=consent` are set so a `refresh_token` is always returned.
+
+**`chloe/config.py`** — Added `google_redirect_uri` field to `Settings`, defaulting to `http://localhost:8000/admin/oauth/google/callback`, overridable via `GOOGLE_REDIRECT_URI` env var.
+
+### Implementation note
+
+`gmail.send` scope is deliberately excluded from `GOOGLE_SCOPES` — it is added in Phase G (G-01) when `send_reply` goes live.
+
+### Tests — `tests/unit/test_google_oauth.py`
+
+5 tests covering: start redirects to Google with gmail.readonly in scope, start returns 500 when client_id missing, callback with no code returns 400, callback with error param returns 400 with error text, full success path stores token and shows display name.
+
+All 122 tests pass.
+
+---
+
+## 2026-05-05 — B-01 · OAuth token storage layer
+
+### What was built
+
+**`chloe/state/oauth_tokens.py`** — Encrypted token storage with three public functions:
+
+- `store(service, token_data)` — encrypts the token dict and writes it to KV under `oauth_token:<service>`. Logs only the service name, never the token values.
+- `load(service)` — reads and decrypts the token; returns `None` if not stored or if decryption fails (errors are logged).
+- `refresh(service)` — loads the stored token, calls the appropriate vendor endpoint (`_refresh_spotify` / `_refresh_google` via `httpx`), stores the new token, and returns it. Preserves the existing `refresh_token` if the vendor response omits it (Spotify pattern).
+
+Encryption uses `PyNaCl` `SecretBox` (XSalsa20-Poly1305) when available, with an AES-GCM fallback via the `cryptography` library. The master key is loaded from `settings.chloe_master_key_file` (raw bytes or base64-encoded) or the `CHLOE_MASTER_KEY_INLINE` env var for development.
+
+### Tests — `tests/unit/test_oauth_tokens.py`
+
+4 tests covering: store→load round-trip, `load` returns `None` for unknown service, raw KV value does not contain the plaintext token, logs contain no token values.
+
+All 112 tests pass.
+
+---
+
+## 2026-05-05 — B-02 · Admin OAuth flow for Spotify
+
+### What was built
+
+**`chloe/admin/api.py`** — Two new admin endpoints added to the existing `admin_router`:
+
+- `GET /admin/oauth/spotify/start` — builds the Spotify authorization URL (with scopes for playback control, library, and playlists) and returns a redirect. Returns HTTP 500 if `SPOTIFY_CLIENT_ID` is not configured.
+- `GET /admin/oauth/spotify/callback` — receives the authorization code, exchanges it for tokens via the Spotify API (Basic-auth header using client_id + client_secret), stores the encrypted token via `store_token("spotify", …)` (B-01), then fetches the Spotify user profile to display the display name on a success page. Errors at any stage return appropriate 4xx/5xx HTML responses.
+
+**`chloe/config.py`** — Added `spotify_redirect_uri` field to `Settings`, defaulting to `http://localhost:8000/admin/oauth/spotify/callback`, overridable via `SPOTIFY_REDIRECT_URI` env var.
+
+### Implementation notes
+
+- Used `urllib.parse.urlencode` for the auth URL to properly encode all parameters (the PRD's manual string join does not encode the space-separated scopes correctly).
+- Token values are passed directly to `store_token` which encrypts them; nothing token-related is logged.
+
+### Tests — `tests/unit/test_spotify_oauth.py`
+
+5 tests covering: start redirects to Spotify with correct client_id, start returns 500 when client_id missing, callback with no code returns 400, callback with error param returns 400 with error text, full success path stores token and shows display name.
+
+All 117 tests pass.
