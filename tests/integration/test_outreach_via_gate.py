@@ -31,7 +31,8 @@ async def test_autonomous_outreach_creates_action_row():
 
     from chloe.chloe import ChloeCore
     core = ChloeCore()
-    await core._send_autonomous_outreach("teo", "thinking of you")
+    with patch("chloe.actions.gate.leash_mod.violates", return_value=(False, "")):
+        await core._send_autonomous_outreach("teo", "thinking of you")
 
     assert len(sent) == 1
     assert sent[0] == "thinking of you"

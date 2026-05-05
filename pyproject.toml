@@ -18,6 +18,9 @@ dependencies = [
     "hypothesis",
     "pytest",
     "pytest-asyncio",
+    "PyJWT[cryptography]",
+    "google-auth",
+    "httpx[http2]",
 ]
 
 [build-system]

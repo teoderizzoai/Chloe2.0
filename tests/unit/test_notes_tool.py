@@ -1,6 +1,16 @@
 import pytest
 from pathlib import Path
 from chloe.tools.notes import NotesTool
+from chloe.state.db import migrate, close
+
+MIGRATIONS_DIR = Path(__file__).parents[2] / "chloe/state/migrations"
+
+
+@pytest.fixture(autouse=True)
+def db(tmp_path):
+    migrate(db_path=tmp_path / "test.db", migrations_dir=MIGRATIONS_DIR)
+    yield
+    close()
 
 
 @pytest.fixture

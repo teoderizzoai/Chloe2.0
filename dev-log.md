@@ -1,5 +1,43 @@
 # Dev Log — Chloe 2.0
 
+## 2026-05-05 — Phase C complete: write verbs, confirmation flow, push, revert (C-01 → C-13)
+
+All 13 Phase C tasks are done. 228 tests pass.
+
+### What was built
+
+**Write verbs (C-01–C-05):** Added `kinetic` verbs to all tools — `SpotifyTool` (queue_track, start_playlist, like, skip, build_playlist, clear_queue), `CalendarTool` (add_event, add_reminder, decline, delete_event), `NotesTool` (truncate_append), `RemindersTool` (add, complete, list), `GmailTool` (draft_reply). Each write verb has `reversibility`, `auth_class`, and where applicable `reverse_verb`. All write verbs register artifacts in `artifact_index` via module-level `_register_artifact()`.
+
+**Episodic memory hook (C-06):** After every successful `kinetic` action, `gate.py` creates a row in `memories` (source=`action`, tags include `["action", tool, verb]`) and writes the `becomes_memory_id` back onto the action row.
+
+**Confirmation ticket lifecycle (C-07):** `chloe/actions/confirm.py` — `ConfirmationTicket` Pydantic model with `TICKET_TTL_MINUTES=60`, `is_stale` property. `send()` stores ticket in kv with `ticket:` prefix, updates action state to `awaiting_confirmation`, and fires a push notification. `confirm()` / `deny()` finalize the ticket; `deny()` writes a `held_back` memory. `expire_pending()` sweeps stale tickets.
+
+**APNs push (C-08):** `chloe/channels/push_apns.py` — JWT signed with ES256 (cached 55 min), HTTP/2 to `api.push.apple.com`. Handles 410 Gone by removing stale device tokens. Payload shapes: `message` vs `confirmation`.
+
+**FCM v1 push (C-09):** `chloe/channels/push_fcm.py` — uses `google.oauth2.service_account` to get OAuth2 bearer token, posts to FCM v1 endpoint. `chloe/channels/push.py` — `preferred_push()` dispatches to APNs or FCM by platform; `get_teo_device_info()` reads from kv `devices` key.
+
+**Confirmation HTTP routes (C-10):** `chloe/channels/confirm_routes.py` — `POST /v1/confirmations/{id}/confirm`, `POST /v1/confirmations/{id}/deny`, `GET /v1/confirmations/pending`, `POST /v1/devices`, `DELETE /v1/devices/{token}`.
+
+**Revert/undo route (C-11):** `chloe/channels/revert_routes.py` — `POST /v1/actions/{action_id}/revert`. Looks up `reverse_verb` on the tool verb definition, executes it, marks action `reverted`, writes a `held_back` memory.
+
+**DB migration (C-12):** `0003_ticket_id.sql` adds `ticket_id TEXT` column to `actions`.
+
+**Dependencies (C-13):** Added `PyJWT[cryptography]`, `google-auth`, `httpx[http2]` to `pyproject.toml`.
+
+### Implementation notes
+
+- `artifact_index.created_by_action` FK requires `None` (not `""`) — all call sites use `args.get("__action_id") or None`.
+- `memories.id` is `INTEGER AUTOINCREMENT`, so `becomes_memory_id` is set via `cursor.lastrowid`, not a ULID.
+- `ticket_id` migration has no FK (ticket IDs are ULIDs stored in kv, not in `actions`).
+- `kinetic-sensitive` actions pass through the leash (auth_ceiling allows them), then hit `confirm.send()` and return `ActionResult(awaiting=True)` instead of executing immediately.
+- Test suite patches `chloe.actions.gate.leash_mod.violates` to bypass quiet-hours in tests that don't test leash behaviour.
+
+### Tests
+
+32 new test files. All 228 tests pass.
+
+---
+
 ## 2026-05-05 — Action layer complete (A-01 → A-08)
 
 The full action layer is implemented and all unit tests pass. This is the foundation for every real-world side effect in 2.0: nothing fires until it passes through the gate.

@@ -66,9 +66,19 @@ async def submit(action: Action) -> ActionResult:
         return await _execute_and_record(action)
 
     if action.authorization == "kinetic-sensitive":
-        # Confirmation not implemented until C-07
-        raise NotImplementedError(
-            f"kinetic-sensitive actions require confirmation (Phase C): {action.id}"
+        from chloe.actions.confirm import send as send_ticket
+        action.state = "awaiting_confirmation"
+        await audit.append(action)
+        ticket = await send_ticket(action)
+        record_action(action.tool, action.verb, "awaiting_confirmation")
+        log.info("gate_awaiting_confirmation", action_id=action.id, ticket_id=ticket.id)
+        return ActionResult(
+            executed=False,
+            suppressed=False,
+            awaiting=True,
+            ticket_id=ticket.id,
+            action_id=action.id,
+            reason=f"Awaiting confirmation (ticket {ticket.id})",
         )
 
     return ActionResult(suppressed=True, reason=f"unknown_auth: {action.authorization}")
@@ -90,6 +100,13 @@ async def _execute_and_record(action: Action) -> ActionResult:
     if result.success:
         action.state = "executed"
         action.result = result.data or {}
+        # C-06: create episodic memory for every successful action
+        artifact_refs = []
+        if result.artifact_ref:
+            artifact_refs = [{"kind": result.artifact_kind or "unknown", "ref": result.artifact_ref}]
+        memory_id = await _create_action_memory(action, artifact_refs)
+        if memory_id is not None:
+            action.becomes_memory_id = memory_id
     else:
         action.state = "failed"
         action.error = result.error or "unknown error"
@@ -104,6 +121,29 @@ async def _execute_and_record(action: Action) -> ActionResult:
         action_id=action.id,
         error=action.error,
     )
+
+
+async def _create_action_memory(action: Action, artifact_refs: list) -> int | None:
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            """
+            INSERT INTO memories (kind, text, source, source_ref, artifact_refs, weight, tags, created_at)
+            VALUES ('episodic', ?, 'action', ?, ?, 1.0, '["action"]', ?)
+            """,
+            (
+                action.intent,
+                action.id,
+                json.dumps(artifact_refs),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        conn.commit()
+        log.info("action_memory_created", memory_id=cursor.lastrowid, action_id=action.id)
+        return cursor.lastrowid
+    except Exception as exc:
+        log.warning("action_memory_failed", error=str(exc))
+        return None
 
 
 def _check_pii_filter(action: Action) -> tuple[bool, str]:

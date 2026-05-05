@@ -1,5 +1,6 @@
 import asyncio
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from chloe.actions import audit, gate
@@ -23,6 +24,12 @@ SCRIPTED_EVENTS = [
     {"tool": "messages", "verb": "send_text",  "args": {"body": "hey"},                             "auth": "kinetic"},
     {"tool": "notes",    "verb": "append",      "args": {"path": "log.md", "text": "\nanother"},    "auth": "kinetic"},
 ]
+
+
+@pytest.fixture(autouse=True)
+def no_leash():
+    with patch("chloe.actions.gate.leash_mod.violates", return_value=(False, "")):
+        yield
 
 
 @pytest.fixture(autouse=True)

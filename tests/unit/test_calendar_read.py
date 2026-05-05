@@ -81,6 +81,7 @@ async def test_find_free_slot_no_space(tool, monkeypatch):
     assert result.data.get("slot_start") is None
 
 
-def test_all_verbs_are_intimate(tool):
+def test_read_verbs_are_intimate(tool):
     for verb in tool.verbs.values():
-        assert verb.auth_class == "intimate"
+        if verb.reversibility == 1.0:
+            assert verb.auth_class in ("intimate", "free"), f"{verb.name} should be read-only"

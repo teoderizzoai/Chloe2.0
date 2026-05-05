@@ -62,6 +62,9 @@ class ToolRegistry:
         tool = self._tools.get(tool_name)
         return tool.get_verb(verb) if tool else None
 
+    def get_tool(self, tool_name: str) -> Tool | None:
+        return self._tools.get(tool_name)
+
 
 _registry: ToolRegistry | None = None
 

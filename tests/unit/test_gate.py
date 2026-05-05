@@ -75,7 +75,7 @@ async def test_suppressed_action_in_db():
 
 
 @pytest.mark.asyncio
-async def test_kinetic_sensitive_raises():
+async def test_kinetic_sensitive_awaits_confirmation():
     a = make_action(auth="kinetic-sensitive")
     from chloe.state.db import get_connection
     conn = get_connection()
@@ -84,8 +84,13 @@ async def test_kinetic_sensitive_raises():
         (json.dumps("kinetic-sensitive"),),
     )
     conn.commit()
-    with pytest.raises(NotImplementedError):
-        await gate.submit(a)
+    import unittest.mock as m
+    with m.patch("chloe.actions.gate.leash_mod.violates", return_value=(False, "")), \
+         m.patch("chloe.channels.push.get_teo_device_info", return_value={}):
+        result = await gate.submit(a)
+    assert result.awaiting
+    assert result.ticket_id
+    assert not result.executed
 
 
 @pytest.mark.asyncio
@@ -113,7 +118,8 @@ async def test_held_back_memory_written():
 async def test_budget_exceeded_self_aborts():
     a = make_action(auth="kinetic")
 
-    with patch("chloe.actions.gate.budget.exceeded_for", return_value=True):
+    with patch("chloe.actions.gate.leash_mod.violates", return_value=(False, "")), \
+         patch("chloe.actions.gate.budget.exceeded_for", return_value=True):
         result = await gate.submit(a)
 
     assert result.suppressed

@@ -55,6 +55,7 @@ def test_summarize_inbox_schema(tool):
     assert tool.verbs["summarize_inbox"].auth_class == "intimate"
 
 
-def test_all_verbs_are_intimate(tool):
+def test_read_verbs_are_intimate(tool):
     for verb in tool.verbs.values():
-        assert verb.auth_class == "intimate"
+        if verb.reversibility == 1.0:
+            assert verb.auth_class in ("intimate", "free"), f"{verb.name} should be read-only"

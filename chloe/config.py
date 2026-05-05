@@ -20,6 +20,16 @@ class Settings:
     google_client_id: str = ""
     google_client_secret: object = None
     google_redirect_uri: str = "http://localhost:8000/admin/oauth/google/callback"
+    chloe_timezone: str = "UTC"
+    # APNs (C-08)
+    apns_key_id: str = ""
+    apns_team_id: str = ""
+    apns_key_path: str = ""
+    apns_bundle_id: str = ""
+    apns_environment: str = "production"
+    # FCM (C-09)
+    fcm_service_account_path: str = ""
+    fcm_project_id: str = ""
 
     def __post_init__(self) -> None:
         if _ENV("CHLOE_DRY_RUN", "").lower() in ("1", "true", "yes"):
@@ -36,6 +46,22 @@ class Settings:
             self.spotify_redirect_uri = redirect_uri
         if redirect_uri := _ENV("GOOGLE_REDIRECT_URI"):
             self.google_redirect_uri = redirect_uri
+        if tz := _ENV("CHLOE_TIMEZONE"):
+            self.chloe_timezone = tz
+        if v := _ENV("APNS_KEY_ID"):
+            self.apns_key_id = v
+        if v := _ENV("APNS_TEAM_ID"):
+            self.apns_team_id = v
+        if v := _ENV("APNS_KEY_PATH"):
+            self.apns_key_path = v
+        if v := _ENV("APNS_BUNDLE_ID"):
+            self.apns_bundle_id = v
+        if v := _ENV("APNS_ENVIRONMENT"):
+            self.apns_environment = v
+        if v := _ENV("FCM_SERVICE_ACCOUNT_PATH"):
+            self.fcm_service_account_path = v
+        if v := _ENV("FCM_PROJECT_ID"):
+            self.fcm_project_id = v
 
 
 _settings: Settings | None = None

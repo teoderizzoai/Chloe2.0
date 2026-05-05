@@ -82,6 +82,7 @@ async def test_no_token_returns_not_playing(tool, monkeypatch):
     assert not result.success or result.data.get("is_playing") is False
 
 
-def test_all_verbs_are_intimate(tool):
+def test_read_verbs_are_intimate(tool):
     for verb in tool.verbs.values():
-        assert verb.auth_class == "intimate"
+        if verb.reversibility == 1.0:
+            assert verb.auth_class in ("intimate", "free"), f"{verb.name} should be read-only"

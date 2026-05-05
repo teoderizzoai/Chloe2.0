@@ -5,6 +5,17 @@ import shutil
 import datetime
 
 
+def _register_artifact(path: str, text: str, action_id: str) -> None:
+    from chloe.state.db import get_connection
+    conn = get_connection()
+    snapshot = text[:200] if text else ""
+    conn.execute(
+        "INSERT OR REPLACE INTO artifact_index (kind, ref, title, snapshot, created_by_action, exists_) VALUES ('notes_doc', ?, ?, ?, ?, 1)",
+        (path, path.split("/")[-1], snapshot, action_id or None),
+    )
+    conn.commit()
+
+
 class NotesTool(Tool):
     name = "notes"
 
@@ -54,6 +65,14 @@ class NotesTool(Tool):
                 description_for_model="Revert a note to a previous version.",
                 description_for_human="Revert note",
             ),
+            "truncate_append": ToolVerb(
+                name="truncate_append",
+                schema={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+                auth_class="kinetic",
+                reversibility=0.0,
+                description_for_model="Undo the most recent append to a note file.",
+                description_for_human="Undo append to note",
+            ),
         }
 
     def _safe_path(self, rel: str) -> Path:
@@ -88,6 +107,8 @@ class NotesTool(Tool):
                 p.parent.mkdir(parents=True, exist_ok=True)
                 with p.open("a", encoding="utf-8") as f:
                     f.write(args["text"])
+                new_content = p.read_text(encoding="utf-8")
+                _register_artifact(args["path"], new_content, args.get("__action_id") or None)
                 return ToolResult(success=True, data={"path": args["path"]}, artifact_ref=args["path"], artifact_kind="notes_doc")
 
             elif verb == "create":
@@ -96,6 +117,7 @@ class NotesTool(Tool):
                     return ToolResult(success=False, error=f"Already exists: {args['path']}")
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text(args["text"], encoding="utf-8")
+                _register_artifact(args["path"], args["text"], args.get("__action_id") or None)
                 return ToolResult(success=True, data={"path": args["path"]}, artifact_ref=args["path"], artifact_kind="notes_doc")
 
             elif verb == "list":
@@ -130,6 +152,9 @@ class NotesTool(Tool):
                 self._save_version(p)
                 shutil.copy2(target_version, p)
                 return ToolResult(success=True, data={"path": args["path"], "reverted_to": target_version.name})
+
+            elif verb == "truncate_append":
+                return await self.execute("revert", {"path": args["path"]})
 
             return ToolResult(success=False, error=f"Unknown verb: {verb}")
 
