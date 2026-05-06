@@ -18,3 +18,16 @@ class OpportunityVector(BaseModel):
     web_search: float = Field(ge=0.0, le=1.0)
     gmail: float = Field(ge=0.0, le=1.0)
     reminders: float = Field(ge=0.0, le=1.0)
+
+
+class AffectLabelResult(BaseModel):
+    label: str = Field(max_length=60)
+
+
+class GradeItem(BaseModel):
+    id: int
+    relevance_note: str
+
+
+class GradeResult(BaseModel):
+    selected: list[GradeItem] = Field(default_factory=list)

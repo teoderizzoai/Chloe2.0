@@ -546,13 +546,13 @@ Add `budget.throttle_level()` to the scoring formula: when `>0.8` daily cap used
 
 ---
 
-## Phase E — Memory & Affect refactor
+## Phase E — Memory & Affect refactor ✓ Done
 
 Goal: JSON state file gone; 4D dimensional affect; kind-mixed retrieval; anchor bonus.
 
 ---
 
-### E-01 · One-shot migration: `chloe_state.json` → `kv` table
+### E-01 · One-shot migration: `chloe_state.json` → `kv` table ✓ Done
 
 Write a script `ops/migrate_json_to_kv.py` that reads `chloe_state.json`, maps each scalar key to the correct `kv` key, and inserts via `kv.set()`. Idempotent (skips already-set keys). Deletes the JSON file on success.
 
@@ -560,7 +560,7 @@ Write a script `ops/migrate_json_to_kv.py` that reads `chloe_state.json`, maps e
 
 ---
 
-### E-02 · Migration `0004_dimensional_affect.sql` — affect_state table
+### E-02 · Migration `0004_dimensional_affect.sql` — affect_state table ✓ Done
 
 Add `affect_state` singleton row and `affect_records` (if not already in 0001). Seed with `(valence=0.0, arousal=0.4, social_pull=0.5, openness=0.6)`.
 
@@ -568,7 +568,7 @@ Add `affect_state` singleton row and `affect_records` (if not already in 0001). 
 
 ---
 
-### E-03 · `affect/dims.py` — 4D state machine
+### E-03 · `affect/dims.py` — 4D state machine ✓ Done
 
 `AfftectState` dataclass. `tick(vitals, hour, recent_records, last_chat_seen) -> AffectState`: applies the dynamics from PRD §12.2 with the stickiness probability (0.05/tick re-evaluation). `load()` / `save()` to `affect_state` table.
 
@@ -576,7 +576,7 @@ Add `affect_state` singleton row and `affect_records` (if not already in 0001). 
 
 ---
 
-### E-04 · `affect/label.py` — lazy Flash labeler
+### E-04 · `affect/label.py` — lazy Flash labeler ✓ Done
 
 `get_label(affect: AffectState) -> str`. Makes a Flash call with `affect_label.md`. Caches result for 30 minutes in `kv["affect_label_cache"]`. Returns cached value on miss.
 
@@ -584,7 +584,7 @@ Add `affect_state` singleton row and `affect_records` (if not already in 0001). 
 
 ---
 
-### E-05 · `affect/dims.py` — `tone_block(affect) -> str`
+### E-05 · `affect/dims.py` — `tone_block(affect) -> str` ✓ Done
 
 A pure function mapping the 4 dimensions to a 1–3 line tone hint appended to the chat system prompt. Replace 1.0's per-mood string lookups with calls to this function. Remove all `mood.py` imports and the 8-mood enum from the codebase.
 
@@ -592,7 +592,7 @@ A pure function mapping the 4 dimensions to a 1–3 line tone hint appended to t
 
 ---
 
-### E-06 · `memory/retrieval.py` — kind-quota composition
+### E-06 · `memory/retrieval.py` — kind-quota composition ✓ Done
 
 `query_mixed(rich_q, kinds_mix) -> list[Memory]`. Builds the candidate set by running separate ChromaDB queries per kind (with per-kind quotas as defaults). Combines into one list. Applies anchor bonus (+0.05 to retrieval score) for memories whose `artifact_refs[0].ref` exists in `artifact_index` with `exists_=1`.
 
@@ -601,7 +601,7 @@ A pure function mapping the 4 dimensions to a 1–3 line tone hint appended to t
 
 ---
 
-### E-07 · Memory grader Flash call — `grade_memories.md`
+### E-07 · Memory grader Flash call — `grade_memories.md` ✓ Done
 
 `grade(candidates, message, history, affect, keep=5) -> list[Memory]`. Flash call using `grade_memories.md`. Returns the top-K from the candidates with a per-memory relevance note. Updates the chat path to use this grader.
 
@@ -609,7 +609,7 @@ A pure function mapping the 4 dimensions to a 1–3 line tone hint appended to t
 
 ---
 
-### E-08 · `memories` table: add `artifact_refs` column (if not in 0001)
+### E-08 · `memories` table: add `artifact_refs` column (if not in 0001) ✓ Done
 
 Migration `0003_artifact_refs.sql` adding `artifact_refs JSON NOT NULL DEFAULT '[]'` and the index. Backfill: for every memory with `source="action"`, look up the action's artifact and copy the ref.
 
@@ -617,7 +617,7 @@ Migration `0003_artifact_refs.sql` adding `artifact_refs JSON NOT NULL DEFAULT '
 
 ---
 
-### E-09 · Update chat path to use new memory retrieval
+### E-09 · Update chat path to use new memory retrieval ✓ Done
 
 In `channels/chat_api.py`, replace the old single-kind ChromaDB query with `memory_store.query_mixed()` + `memory_store.grade()`. Update the prompt assembly to use the graded memories.
 
@@ -625,7 +625,7 @@ In `channels/chat_api.py`, replace the old single-kind ChromaDB query with `memo
 
 ---
 
-### E-10 · Memory decay daily job
+### E-10 · Memory decay daily job ✓ Done
 
 `memory/store.py`: `decay_all()` applies `decay(weight, age_days, kind)` from PRD §11.7 to all memories. Run at 04:00 local time via the background task loop.
 
@@ -956,7 +956,7 @@ Add `humor: HumorDetection` to `ExchangeExtraction` (detected, kind, direction, 
 
 ---
 
-### E-11 · `persons.attachment_depth` — relational depth as first-class state
+### E-11 · `persons.attachment_depth` — relational depth as first-class state ✓ Done
 
 Add `attachment_depth REAL DEFAULT 0.0` to `persons` table (range `[-1, 1]`). Extend per-chat extraction with `attachment_delta` (float, `[-0.05, 0.05]`). After each turn, apply delta via `persons/attachment.py`. Daily decay job applies silence decay after 3-day threshold. Affect model's `openness` receives a `+0.15 * attachment_depth` bias. Initiative engine scales outreach score by an attachment multiplier. Chat prompt injects a prose relationship label. Weekly self-model input includes `attachment_depth`.
 
@@ -966,7 +966,7 @@ Add `attachment_depth REAL DEFAULT 0.0` to `persons` table (range `[-1, 1]`). Ex
 
 ---
 
-### E-12 · Conflict and repair arcs — rupture detection and resolution
+### E-12 · Conflict and repair arcs — rupture detection and resolution ✓ Done
 
 Extend per-reflect synthesis output with `rupture_signal: bool` and `rupture_note: str | None`. When Haiku fires `rupture_signal`, open a `rupture` arc (`arcs` table, `kind="rupture"`, intensity set from note weight). During an active rupture: initiative threshold rises, `should_deliberate()` returns True for all kinetic actions, chat prompt includes a care note, `attachment_depth` takes the cold penalty. Repair: 3 consecutive positive `attachment_delta` turns resolve the arc and write an autobiographical memory. Fade: arc unresolved for 7 days → state `"faded"` and a different autobiographical memory.
 
@@ -985,7 +985,7 @@ Extend per-reflect synthesis output with `rupture_signal: bool` and `rupture_not
 | B | B-01 – B-10 | Spotify/Gmail/Calendar reads; audit in chat prompt |
 | C | C-01 – C-13 | Kinetic writes; artifact index; confirmation channel end-to-end |
 | D | D-01 – D-11 | New Initiative Engine live; old event loop deleted |
-| E | E-01 – E-12 | Single DB; 4D affect; attachment depth; rupture arcs; humor seeding |
+| E ✓ | E-01 – E-12 | Single DB; 4D affect; attachment depth; rupture arcs; humor seeding |
 | F | F-V01 – F-M10 | One voice path; mobile app in TestFlight |
 | G | G-01 – G-06 | Email send + smart home with confirmation |
 | H | H-01 – H-09 | Procedural memory; weekly self-modeling; held-back identity; voice drift |

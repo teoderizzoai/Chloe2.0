@@ -1,5 +1,60 @@
 # Dev Log — Chloe 2.0
 
+## 2026-05-06 — Phase E complete: memory & affect refactor (E-01 → E-12)
+
+All 12 Phase E tasks are done. 363 tests pass.
+
+### What was built
+
+**E-01 · `ops/migrate_json_to_kv.py`**
+One-shot migration script that reads `chloe_state.json`, copies each scalar key into the `kv` table via `kv.set()` (skipping already-set keys), then deletes the JSON file. Idempotent. Run on a copy of the production DB before restarting the server without the JSON file.
+
+**E-02 · `affect_state` table — already in `0001_init.sql`**
+The 4D affect singleton row (`valence=0.0, arousal=0.4, social_pull=0.5, openness=0.6`) was seeded in migration 0001. No new migration needed.
+
+**E-03 · `affect/dims.py` — 4D state machine**
+`AffectState` dataclass with `valence` [-1,1], `arousal` [0,1], `social_pull` [0,1], `openness` [0,1]. `tick(vitals, hour, recent_records, last_chat_seen) -> AffectState` applies time-of-day dynamics, residue from affect records, mean-reversion toward baseline, and a social-pull boost from recent chat. Stickiness: 5% chance per tick to skip re-evaluation. `load()` / `save()` to `affect_state` table. Property test: 1000 ticks with stable inputs stay within all bounds.
+
+**E-04 · `affect/label.py` — lazy Flash labeler**
+`get_label(affect) -> str` calls Gemini Flash with `affect_label.md` and caches the result in `kv["affect_label_cache"]` for 30 minutes. `AffectLabelResult` Pydantic schema added to `llm/schemas.py`. `affect_label.md` prompt template added. Integration tests (real Gemini API key): first call hits the API; second call within 30 minutes returns cached value; call after 31 minutes hits the API again.
+
+**E-05 · `tone_block(affect) -> str`**
+Pure function in `affect/dims.py` mapping 4D dimensions to a 1–3 line tone hint for the system prompt. `chat_api.py` updated to call `tone_block(load())` instead of `kv.get("mood_label")` — the hardcoded mood-label lookup is gone.
+
+**E-06 · `memory/retrieval.py` — kind-quota composition**
+`Memory` dataclass. `query_mixed(rich_q, kinds_mix) -> list[Memory]` runs per-kind ChromaDB queries (default: 12 episodic + 4 semantic + 2 autobiographical + 2 procedural), combines results, removes duplicates, applies anchor bonus (+0.05 to score for memories whose first `artifact_refs[0].ref` exists in `artifact_index` with `exists_=1`), and returns sorted by score. `add_to_chroma()` helper syncs a memory to the `memories_v2` ChromaDB collection. `chloe/state/chroma.py` implemented: `get_client()` returns a `PersistentClient` if `CHROMA_PATH` is set, else `EphemeralClient`; `get_collection()` and `reset_client()`.
+
+**E-07 · Memory grader — `grade_memories.md`**
+`grade(candidates, message, history, affect, keep=5) -> list[Memory]` in `memory/store.py`. Builds a formatted candidates list and calls Gemini Flash with `grade_memories.md`. Parses the `GradeResult` response (new schema in `llm/schemas.py`) to select top-K and attach `relevance_note` to each returned Memory. Falls back to `candidates[:keep]` on LLM failure. Integration test (real Gemini API key): 20 candidates → ≤5 returned with notes.
+
+**E-08 · `artifact_refs` — already in `0001_init.sql`**
+The `artifact_refs JSON NOT NULL DEFAULT '[]'` column and index were already in the `memories` table from migration 0001. Backfill script `ops/backfill_artifact_refs.py` copies artifact refs from `artifact_index` into memories with `source='action'` and empty `artifact_refs`. Idempotent.
+
+**E-09 · Chat path with memory retrieval**
+`channels/chat_api.py` updated: `build_dynamic_suffix(person_id, message="")` now (1) uses `tone_block(load())` for affect text, (2) calls `query_mixed()` + `grade()` when a message is present and includes top-5 graded memories as a `## Relevant memories` block, and (3) injects a relationship prose label from `attachment.relationship_label()` as `## Relationship context`. Integration test (real Gemini API key): action memory queued + grader called → memory surfaces in results.
+
+**E-10 · Memory decay daily job**
+`memory/store.py`: `decay(weight, age_days, kind) -> float` applies exponential half-life decay (`weight * 0.5^(age/half_life)`). Half-lives: episodic=60d, semantic=180d, autobiographical=365d, procedural=90d. `decay_all()` updates all hot-tier memories in SQLite and returns the count updated. Unit test: 60-day episodic memory weight halved to 0.5.
+
+**E-11 · `persons.attachment_depth` — relational depth**
+Migration `0005_attachment_depth.sql` adds `attachment_depth REAL NOT NULL DEFAULT 0.0` to the `persons` table. `persons/attachment.py`: `apply_delta(person_id, delta)` applies a clamped delta ([-0.05, 0.05]) to attachment depth, clamped to [-1, 1]. `apply_silence_decay(person_id, days_since_contact)` reduces depth at 0.02/day after a 3-day silence threshold. `openness_bias(depth) -> float` returns `0.15 * depth` to add to the affect model's openness. `relationship_label(depth) -> str` returns a prose label (deeply close → warmly connected → friendly → neutral → distant → estranged). `persons/store.py` implemented with `get_attachment_depth()` / `set_attachment_depth()`.
+
+**E-12 · Conflict and repair arcs**
+Migration `0006_rupture_arcs.sql` recreates the `arcs` table with `rupture` added to the kind constraint, plus new columns `state` (active/resolved/faded), `note TEXT`, and `positive_turns_count INTEGER`. `affect/arc.py`: `open_rupture(intensity, note)` creates a rupture arc. `record_positive_turn(arc_id)` increments the counter; 3 consecutive positive turns call `_resolve_arc()` which sets state=resolved, writes an autobiographical memory, and logs. `fade_stale()` marks arcs unresolved for 7+ days as faded with a different autobiographical memory. `should_deliberate_all_kinetic()` returns True when any rupture arc is active.
+
+### Implementation notes
+
+- ChromaDB's `EphemeralClient` shares in-process state between instances, so tests use explicit `client.delete_collection(name)` teardown rather than `reset_client()` to isolate test collections.
+- `memory/store.add()` writes to both SQLite and ChromaDB atomically (SQLite first, then Chroma); the IDs are SQLite `lastrowid` values, used as Chroma document IDs (string-cast).
+- `grade_memories.md` prompt uses `{{keep}}` placeholder so the Flash call self-limits even if more IDs come back.
+- E-02 and E-08 were already complete in the foundations phase (affect_state table and artifact_refs column both in 0001_init.sql). Only documentation changes needed.
+
+### Tests
+
+61 new test cases across 10 files (8 unit, 2 integration). All integration tests use the real Gemini API key from `.env`. 363 tests total pass.
+
+---
+
 ## 2026-05-06 — Phase D complete: deliberation, initiative engine, shadow mode (D-01 → D-11)
 
 All 11 Phase D tasks are done. 291 tests pass.
