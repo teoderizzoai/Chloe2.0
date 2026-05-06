@@ -21,6 +21,8 @@ dependencies = [
     "PyJWT[cryptography]",
     "google-auth",
     "httpx[http2]",
+    "google-genai",
+    "python-dotenv",
 ]
 
 [build-system]

@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import os
+import re
+from pathlib import Path
+from typing import Any
+
 from chloe.observability.logging import get_logger
 
 log = get_logger("llm.gemini")
 
 _cache_name: str | None = None
+_PROMPTS_DIR = Path(__file__).parent / "prompts"
+_PLACEHOLDER_RE = re.compile(r"\{\{([\w.]+)\}\}")
 
 
 def get_cache_name() -> str | None:
@@ -25,13 +32,52 @@ async def cache_static_prefix() -> str | None:
         return None
 
 
+def _render_prompt(prompt_file: str, context: dict) -> str:
+    """Load a prompt template and substitute {{key}} / {{nested.key}} placeholders."""
+    template = (_PROMPTS_DIR / prompt_file).read_text()
+
+    def _resolve(path: str) -> str:
+        parts = path.split(".")
+        node: Any = context
+        for part in parts:
+            if isinstance(node, dict):
+                node = node.get(part, "")
+            else:
+                node = getattr(node, part, "")
+        return str(node) if node is not None else ""
+
+    return _PLACEHOLDER_RE.sub(lambda m: _resolve(m.group(1)), template)
+
+
 class GeminiClient:
     def __init__(self, api_key: str | None = None):
-        self._api_key = api_key
+        self._api_key = api_key or os.environ.get("GEMINI_API_KEY")
 
     async def flash(self, prompt_file: str, context: dict, schema) -> dict | None:
-        log.warning("gemini_client_stub_called", prompt_file=prompt_file)
-        return None
+        if not self._api_key:
+            log.warning("gemini_no_api_key", prompt_file=prompt_file)
+            return None
+
+        try:
+            from google import genai
+            from google.genai import types as genai_types
+
+            client = genai.Client(api_key=self._api_key)
+            prompt = _render_prompt(prompt_file, context)
+
+            resp = await client.aio.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config=genai_types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=schema,
+                ),
+            )
+            import json
+            return json.loads(resp.text)
+        except Exception as e:
+            log.warning("gemini_flash_failed", prompt_file=prompt_file, error=str(e))
+            return None
 
 
 def get_client() -> GeminiClient:
