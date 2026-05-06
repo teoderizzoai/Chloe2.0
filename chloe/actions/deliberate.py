@@ -9,13 +9,17 @@ from chloe.actions.audit import recent as audit_recent, feed_text
 from chloe.actions.budget import throttle_level as _throttle_level
 from chloe.state.kv import get as kv_get
 from chloe.observability.logging import get_logger
+from chloe.observability.metrics import deliberation_calls_total
 
 log = get_logger("deliberate")
+
+DELIBERATION_THINKING_BUDGET = 512
 
 
 async def deliberate(action, context: dict | None = None) -> Verdict | None:
     """
-    Run a Flash deliberation call for the proposed action.
+    Run a deliberation LLM call for the proposed action.
+    Escalates to pro_thinking when action is kinetic-sensitive AND high-cost.
     Returns Verdict or None (treat as proceed) on LLM failure.
     """
     context = context or {}
@@ -39,8 +43,28 @@ async def deliberate(action, context: dict | None = None) -> Verdict | None:
         "last_chat_seen": kv_get("last_chat_seen", default="unknown"),
     }
 
+    use_pro = _is_kinetic_sensitive(action) and _high_cost_estimate(action)
     llm = get_llm()
-    result = await llm.flash("deliberate_action.md", payload, schema=Verdict)
+
+    try:
+        if use_pro:
+            log.info("deliberate_pro_thinking", action_id=action.id,
+                     cost_usd=getattr(getattr(action, "cost_estimate", None), "usd", 0.0))
+            deliberation_calls_total.labels(model="pro_thinking").inc()
+            result = await llm.pro_thinking(
+                prompt_file="deliberate_action.md",
+                context=payload,
+                schema=Verdict,
+                thinking_budget=DELIBERATION_THINKING_BUDGET,
+            )
+        else:
+            log.info("deliberate_flash", action_id=action.id)
+            deliberation_calls_total.labels(model="flash").inc()
+            result = await llm.flash("deliberate_action.md", payload, schema=Verdict)
+    except Exception as exc:
+        log.warning("deliberation_llm_error", error=str(exc))
+        return None
+
     if result is None:
         log.warning("deliberation_llm_failed", action_id=action.id)
         return None

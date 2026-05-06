@@ -94,12 +94,28 @@ class GmailTool(Tool):
                 description_for_human="Draft Gmail reply",
                 reverse_verb="delete_draft",
             ),
+            "send_reply": ToolVerb(
+                name="send_reply",
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "draftId": {"type": "string", "description": "Gmail draft ID to send"},
+                    },
+                    "required": ["draftId"],
+                },
+                auth_class="kinetic-sensitive",
+                reversibility=0.0,
+                description_for_model="Send a Gmail draft. Requires explicit confirmation. Cannot be undone.",
+                description_for_human="Send Gmail reply",
+            ),
         }
 
     def dry_run(self, verb: str, args: dict) -> str:
         if verb == "draft_reply":
             preview = args.get("body", "")[:80]
             return f"Would draft reply to thread {args.get('threadId', '?')}: \"{preview}\""
+        if verb == "send_reply":
+            return f"Would send draft {args.get('draftId', '?')} — this cannot be undone"
         return super().dry_run(verb, args)
 
     async def _headers(self) -> dict | None:
@@ -232,4 +248,89 @@ class GmailTool(Tool):
                 )
             return ToolResult(success=False, error=f"Gmail API error: {resp.status_code}")
 
+        if verb == "send_reply":
+            return await self._send_reply(args)
+
         return ToolResult(success=False, error=f"Unknown verb: {verb}")
+
+    async def _send_reply(self, args: dict) -> ToolResult:
+        hdrs = await self._headers()
+        if not hdrs:
+            return ToolResult(success=False, error="No Google token — run OAuth flow first")
+
+        draft_id = args.get("draftId", "")
+        if not draft_id:
+            return ToolResult(success=False, error="draftId required")
+
+        to_blocked = await self._check_send_blocklist(draft_id, hdrs)
+        if to_blocked:
+            return ToolResult(
+                success=False,
+                error=f"Send blocked: recipient {to_blocked!r} is on the dont_send_to list",
+            )
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                f"{GMAIL_API}/users/me/drafts/send",
+                headers={**hdrs, "Content-Type": "application/json"},
+                json={"id": draft_id},
+            )
+
+        if resp.status_code == 401:
+            new_token = await refresh_token("google")
+            if new_token:
+                hdrs = {"Authorization": f"Bearer {new_token['access_token']}", "Content-Type": "application/json"}
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    resp = await client.post(
+                        f"{GMAIL_API}/users/me/drafts/send",
+                        headers=hdrs,
+                        json={"id": draft_id},
+                    )
+
+        if resp.status_code == 200:
+            message_id = resp.json().get("id", "")
+            from chloe.state.db import get_connection
+            conn = get_connection()
+            conn.execute(
+                "UPDATE artifact_index SET exists_=1, ref=? WHERE ref=? AND kind='gmail_thread'",
+                (message_id, draft_id),
+            )
+            conn.commit()
+            return ToolResult(
+                success=True,
+                data={"messageId": message_id, "draftId": draft_id},
+                artifact_ref=message_id,
+                artifact_kind="gmail_thread",
+            )
+        return ToolResult(success=False, error=f"Gmail API error: {resp.status_code}")
+
+    async def _check_send_blocklist(self, draft_id: str, hdrs: dict) -> str | None:
+        """Return the blocked recipient address if any, else None."""
+        import json as _json
+        from chloe.state.db import get_connection
+        conn = get_connection()
+        row = conn.execute(
+            "SELECT value FROM preferences WHERE key='gmail_dont_send_to'"
+        ).fetchone()
+        blocked = _json.loads(row["value"]) if row else []
+        if not blocked:
+            return None
+
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(
+                    f"{GMAIL_API}/users/me/drafts/{draft_id}",
+                    headers=hdrs,
+                )
+            if resp.status_code != 200:
+                return None
+
+            draft_data = resp.json()
+            headers = draft_data.get("message", {}).get("payload", {}).get("headers", [])
+            to_header = next((h["value"] for h in headers if h["name"].lower() == "to"), "")
+            for blocked_addr in blocked:
+                if blocked_addr.lower() in to_header.lower():
+                    return blocked_addr
+        except Exception:
+            pass
+        return None

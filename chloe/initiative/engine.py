@@ -178,6 +178,8 @@ def _load_affect() -> dict:
 def realize(candidate: CandidateAction, now: datetime | None = None) -> Action:
     """Turn a CandidateAction into a full Action with auth class from the tool registry."""
     from chloe.tools.registry import get_registry
+    from chloe.tools.costs import get_cost_estimate
+    from chloe.actions.schema import CostEstimate
     registry = get_registry()
 
     auth_class = "free"
@@ -187,6 +189,8 @@ def realize(candidate: CandidateAction, now: datetime | None = None) -> Action:
         if verb_def:
             auth_class = verb_def.auth_class
 
+    tool_cost = get_cost_estimate(candidate.tool, candidate.verb)
+
     return Action(
         tool=candidate.tool,
         verb=candidate.verb,
@@ -194,4 +198,5 @@ def realize(candidate: CandidateAction, now: datetime | None = None) -> Action:
         intent=candidate.intent,
         preview=f"[Initiative] {candidate.tool}.{candidate.verb}: {candidate.intent[:60]}",
         authorization=auth_class,
+        cost_estimate=CostEstimate(usd=tool_cost.usd),
     )

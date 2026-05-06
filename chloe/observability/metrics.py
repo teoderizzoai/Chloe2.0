@@ -58,6 +58,12 @@ chloe_kv_age_seconds = Gauge(
     "Seconds since the oldest kv entry was last updated",
 )
 
+deliberation_calls_total = Counter(
+    "chloe_deliberation_calls_total",
+    "Number of deliberation LLM calls",
+    labelnames=["model"],
+)
+
 metrics_router = APIRouter()
 
 

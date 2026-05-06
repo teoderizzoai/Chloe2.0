@@ -80,5 +80,41 @@ class GeminiClient:
             return None
 
 
+    async def pro_thinking(
+        self,
+        prompt_file: str,
+        context: dict,
+        schema,
+        thinking_budget: int = 512,
+    ) -> dict | None:
+        if not self._api_key:
+            log.warning("gemini_no_api_key", prompt_file=prompt_file)
+            return None
+
+        try:
+            from google import genai
+            from google.genai import types as genai_types
+
+            client = genai.Client(api_key=self._api_key)
+            prompt = _render_prompt(prompt_file, context)
+
+            resp = await client.aio.models.generate_content(
+                model="gemini-2.5-pro",
+                contents=prompt,
+                config=genai_types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=schema,
+                    thinking_config=genai_types.ThinkingConfig(
+                        thinking_budget=thinking_budget,
+                    ),
+                ),
+            )
+            import json
+            return json.loads(resp.text)
+        except Exception as e:
+            log.warning("gemini_pro_thinking_failed", prompt_file=prompt_file, error=str(e))
+            return None
+
+
 def get_client() -> GeminiClient:
     return GeminiClient()

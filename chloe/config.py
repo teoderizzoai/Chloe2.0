@@ -32,6 +32,9 @@ class Settings:
     fcm_project_id: str = ""
     # Initiative engine (D-10) — calibrated after 14 days of shadow mode
     initiative_threshold: float = 0.35
+    # HomeAssistant (G-03)
+    ha_base_url: str = "http://homeassistant.tail.ts:8123"
+    ha_token: str = ""
     # Voice (F-V01, F-V02)
     whisper_mode: str = "local"  # "local" or "deepgram"
     whisper_model_name: str = "large-v3"
@@ -86,6 +89,10 @@ class Settings:
             self.elevenlabs_api_key = v
         if v := _ENV("ELEVENLABS_VOICE_ID"):
             self.elevenlabs_voice_id = v
+        if v := _ENV("HA_BASE_URL"):
+            self.ha_base_url = v
+        if v := _ENV("HA_TOKEN"):
+            self.ha_token = v
 
 
 _settings: Settings | None = None

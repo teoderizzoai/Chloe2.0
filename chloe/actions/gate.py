@@ -45,7 +45,18 @@ async def submit(action: Action) -> ActionResult:
         log.info("gate_budget_exceeded", action_id=action.id)
         return ActionResult(suppressed=True, reason="budget_exceeded", action_id=action.id)
 
-    # 2b. PII filter for web_search
+    # 2b. HA allowlist check for smart_home
+    ha_denial = await _check_ha_allowlist(action)
+    if ha_denial:
+        action.state = "held_back"
+        await audit.append(action)
+        await _store_held_back_memory(action, ha_denial)
+        record_action(action.tool, action.verb, "held_back")
+        record_held_back("ha_allowlist")
+        log.info("gate_ha_allowlist_denied", action_id=action.id, reason=ha_denial)
+        return ActionResult(suppressed=True, reason=ha_denial, action_id=action.id)
+
+    # 2c. PII filter for web_search
     pii_blocked, pii_reason = _check_pii_filter(action)
     if pii_blocked:
         action.state = "self_aborted"
@@ -161,6 +172,32 @@ async def _create_action_memory(action: Action, artifact_refs: list) -> int | No
     except Exception as exc:
         log.warning("action_memory_failed", error=str(exc))
         return None
+
+
+async def _check_ha_allowlist(action: Action) -> str | None:
+    """Return a denial reason if the HA entity is not on the allowlist, else None."""
+    if action.tool != "smart_home":
+        return None
+
+    entity = action.args.get("entity") or action.args.get("name")
+    if not entity:
+        return None
+
+    import json as _json
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT value FROM preferences WHERE key='ha_allowlist'"
+    ).fetchone()
+    if not row:
+        return None
+
+    allowed = _json.loads(row["value"])
+    if not allowed:
+        return None  # empty allowlist means unrestricted
+
+    if entity not in allowed:
+        return f"HA entity {entity!r} is not on the allowlist"
+    return None
 
 
 def _check_pii_filter(action: Action) -> tuple[bool, str]:
