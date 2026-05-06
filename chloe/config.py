@@ -32,6 +32,14 @@ class Settings:
     fcm_project_id: str = ""
     # Initiative engine (D-10) — calibrated after 14 days of shadow mode
     initiative_threshold: float = 0.35
+    # Voice (F-V01, F-V02)
+    whisper_mode: str = "local"  # "local" or "deepgram"
+    whisper_model_name: str = "large-v3"
+    deepgram_api_key: str = ""
+    cartesia_api_key: str = ""
+    cartesia_voice_id: str = ""
+    elevenlabs_api_key: str = ""
+    elevenlabs_voice_id: str = ""
 
     def __post_init__(self) -> None:
         if _ENV("CHLOE_DRY_RUN", "").lower() in ("1", "true", "yes"):
@@ -64,6 +72,20 @@ class Settings:
             self.fcm_service_account_path = v
         if v := _ENV("FCM_PROJECT_ID"):
             self.fcm_project_id = v
+        if v := _ENV("WHISPER_MODE"):
+            self.whisper_mode = v
+        if v := _ENV("WHISPER_MODEL"):
+            self.whisper_model_name = v
+        if v := _ENV("DEEPGRAM_API_KEY"):
+            self.deepgram_api_key = v
+        if v := _ENV("CARTESIA_API_KEY"):
+            self.cartesia_api_key = v
+        if v := _ENV("CARTESIA_VOICE_ID"):
+            self.cartesia_voice_id = v
+        if v := _ENV("ELEVENLABS_API_KEY"):
+            self.elevenlabs_api_key = v
+        if v := _ENV("ELEVENLABS_VOICE_ID"):
+            self.elevenlabs_voice_id = v
 
 
 _settings: Settings | None = None

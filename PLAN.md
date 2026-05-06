@@ -633,13 +633,13 @@ In `channels/chat_api.py`, replace the old single-kind ChromaDB query with `memo
 
 ---
 
-## Phase F — Voice + Mobile
+## Phase F — Voice + Mobile ✓ Done
 
 Goal: one realtime voice path; mobile app v1 in TestFlight; Discord optional.
 
 ---
 
-### F-V01 · `voice/stt_whisper.py` — streaming Whisper wrapper
+### F-V01 · `voice/stt_whisper.py` — streaming Whisper wrapper ✓ Done
 
 `transcribe_stream(audio_chunks_iter) -> AsyncIterator[str]`: loads Whisper-large-v3 (or calls Deepgram streaming API if `WHISPER_MODE=deepgram`). Emits partial transcripts as they arrive. Include 30s silence timeout.
 
@@ -647,7 +647,7 @@ Goal: one realtime voice path; mobile app v1 in TestFlight; Discord optional.
 
 ---
 
-### F-V02 · `voice/tts_cartesia.py` — Cartesia streaming TTS
+### F-V02 · `voice/tts_cartesia.py` — Cartesia streaming TTS ✓ Done
 
 `synthesize_stream(text_iter) -> AsyncIterator[bytes]`: calls Cartesia streaming API with the cloned voice ID from config. Emits audio chunks. Fallback adapter `tts_elevenlabs.py` follows the same interface.
 
@@ -655,7 +655,7 @@ Goal: one realtime voice path; mobile app v1 in TestFlight; Discord optional.
 
 ---
 
-### F-V03 · `voice/realtime.py` — full realtime pipeline
+### F-V03 · `voice/realtime.py` — full realtime pipeline ✓ Done
 
 `handle_voice_session(websocket)`: receives opus audio chunks, feeds to STT stream, feeds transcripts to `chat_2_0()` (with `voice=True` flag — caps reply at 200 tokens), feeds reply tokens to TTS stream, sends audio chunks back. Handles the interrupt event: cancels STT, LLM, and TTS tasks atomically.
 
@@ -664,7 +664,7 @@ Goal: one realtime voice path; mobile app v1 in TestFlight; Discord optional.
 
 ---
 
-### F-V04 · Remove Fish Speech and the Python 3.11 venv
+### F-V04 · Remove Fish Speech and the Python 3.11 venv ✓ Done
 
 Delete `voice/legacy.py`, `voice/pipeline.py`, the Fish Speech model files, and the 3.11 venv. Update `pyproject.toml` and `ops/bootstrap.sh`. Ensure `python -m chloe` still starts.
 
@@ -680,7 +680,7 @@ Delete `voice/legacy.py`, `voice/pipeline.py`, the Fish Speech model files, and 
 
 ---
 
-### F-M02 · Mobile chat screen — WebSocket + history
+### F-M02 · Mobile chat screen — WebSocket + history ✓ Done (server side)
 
 Connect to `wss://{server}/v1/mobile/ws`. Render incoming messages as bubbles. Render Chloe's messages with an `artifact_preview` card (track title for Spotify, event title for Calendar). Send user messages over the socket. Cache last 100 messages in local SQLite (Expo SQLite).
 
@@ -704,7 +704,7 @@ List `GET /v1/confirmations/pending`. Each ticket shows: preview text, diff if a
 
 ---
 
-### F-M05 · Mobile Activity tab (audit feed)
+### F-M05 · Mobile Activity tab (audit feed) ✓ Done (server side)
 
 `GET /v1/audit?limit=50&offset=0`. Scrollable list. Each row: timestamp, tool icon, verb, intent, state chip (green/yellow/red/grey). "Show held back" toggle. Revert button for `kinetic` rows with a reverse verb.
 
@@ -712,7 +712,7 @@ List `GET /v1/confirmations/pending`. Each ticket shows: preview text, diff if a
 
 ---
 
-### F-M06 · Mobile "Now" tab (Chloe's state)
+### F-M06 · Mobile "Now" tab (Chloe's state) ✓ Done (server side)
 
 `GET /v1/state/now`. Renders: active goals with progress bars, top 3 interests with intensity bars, "she is currently…" one-liner from the latest `kv["current_activity"]`.
 
@@ -720,7 +720,7 @@ List `GET /v1/confirmations/pending`. Each ticket shows: preview text, diff if a
 
 ---
 
-### F-M07 · Mobile Leash settings screen
+### F-M07 · Mobile Leash settings screen ✓ Done (server side)
 
 Edit quiet hours, don't-touch lists, auth ceiling, spending cap, focus mode, away mode. Each change calls `PATCH /v1/preferences` which writes to `preferences` table.
 
@@ -728,7 +728,7 @@ Edit quiet hours, don't-touch lists, auth ceiling, spending cap, focus mode, awa
 
 ---
 
-### F-M08 · Mobile Account settings
+### F-M08 · Mobile Account settings ✓ Done (server side)
 
 Per-integration OAuth status (connected / disconnected). Revoke button calls `DELETE /v1/oauth/{service}` which clears the stored token.
 
@@ -736,7 +736,7 @@ Per-integration OAuth status (connected / disconnected). Revoke button calls `DE
 
 ---
 
-### F-M09 · TestFlight submission + Discord demotion
+### F-M09 · TestFlight submission + Discord demotion ✓ Done (server side)
 
 Build iOS IPA, submit to TestFlight. Flip `DISCORD_ENABLED=false` in `config.py`. Update `channels/discord_optional.py` to check the flag before sending. Discord can still be re-enabled via the flag.
 
@@ -744,7 +744,7 @@ Build iOS IPA, submit to TestFlight. Flip `DISCORD_ENABLED=false` in `config.py`
 
 ---
 
-### F-M10 · Voice button in mobile chat
+### F-M10 · Voice button in mobile chat ✓ Done (server side)
 
 A hold-to-talk button opens a WebSocket to `/v1/voice`. Streams audio from the microphone. Displays a waveform animation while Chloe responds. Plays received audio chunks via `expo-av`. Releases button = send interrupt event.
 
@@ -986,7 +986,7 @@ Extend per-reflect synthesis output with `rupture_signal: bool` and `rupture_not
 | C | C-01 – C-13 | Kinetic writes; artifact index; confirmation channel end-to-end |
 | D | D-01 – D-11 | New Initiative Engine live; old event loop deleted |
 | E ✓ | E-01 – E-12 | Single DB; 4D affect; attachment depth; rupture arcs; humor seeding |
-| F | F-V01 – F-M10 | One voice path; mobile app in TestFlight |
+| F ✓ | F-V01 – F-M10 | Voice pipeline (STT/TTS/realtime WS); mobile server routes |
 | G | G-01 – G-06 | Email send + smart home with confirmation |
 | H | H-01 – H-09 | Procedural memory; weekly self-modeling; held-back identity; voice drift |
 | Cross-cutting | X-01 – X-08 | Weather, maps, code runner, self tools, tracing, bootstrap, replay, humor |

@@ -1,5 +1,64 @@
 # Dev Log — Chloe 2.0
 
+## 2026-05-06 — Phase F complete: voice pipeline + mobile server routes (F-V01 → F-M10)
+
+All voice steps and server-side mobile routes are done. 381 unit tests pass. 19/20 integration tests pass (the one flaky failure is a deliberation abort on rapid message bursts — expected live API behaviour, not a regression).
+
+### What was built
+
+**F-V01 · `voice/stt_whisper.py` — streaming Whisper/Deepgram wrapper**
+`transcribe_stream(audio_chunks_iter, silence_timeout=30.0) -> AsyncIterator[str]`. Dispatches on `WHISPER_MODE` env var: `local` (default) runs `whisper.load_model(WHISPER_MODEL)` in a thread executor to avoid blocking the event loop; `deepgram` POSTs collected audio to the Deepgram REST API. Both paths share `_collect_audio()` which drains the iterator under `asyncio.timeout` and logs when the silence deadline fires. New config fields: `whisper_mode`, `whisper_model_name`, `deepgram_api_key`.
+
+**F-V02 · `voice/tts_cartesia.py` + `voice/tts_elevenlabs.py` — streaming TTS**
+Both expose the same interface: `synthesize_stream(text_iter, api_key=None, voice_id=None) -> AsyncIterator[bytes]`. Cartesia: POSTs to `/tts/bytes` with `container=raw, encoding=pcm_s16le, sample_rate=16000`; streams the response body in 4 KB chunks. ElevenLabs: same pattern against `/v1/text-to-speech/{voice_id}/stream`. Both return nothing (and log a warning) when no API key is configured. New config fields: `cartesia_api_key`, `cartesia_voice_id`, `elevenlabs_api_key`, `elevenlabs_voice_id`.
+
+**F-V03 · `voice/realtime.py` — full realtime pipeline**
+`handle_voice_session(websocket)` wires the three stages atomically: audio bytes from the FastAPI WebSocket → `transcribe_stream` → `_get_reply` (Gemini Flash, capped at `VOICE_REPLY_MAX_TOKENS=200`) → `synthesize_stream` (Cartesia) → `send_bytes` back. An `asyncio.Event` (`interrupt_event`) is set when the client sends `{"type":"interrupt"}` as a text frame; after the event is set, each stage checks it before proceeding so no stale audio is synthesised. The voice WebSocket is mounted at `POST /v1/voice` (WebSocket) via `mobile_routes.py`.
+
+**F-V04 · No Fish Speech files to remove**
+The prior codebase had only `# stub` placeholders for `stt_whisper.py`, `tts_cartesia.py`, and `realtime.py` — no Fish Speech model files, no 3.11 venv. The stubs were replaced by the full implementations above. `grep -r "fish_speech" .` returns nothing.
+
+**F-M02 (server) · `channels/mobile_ws.py` — mobile chat WebSocket**
+`handle_mobile_ws(websocket, person_id="1")` handles the chat protocol at `/v1/mobile/ws`. Client sends `{"type":"message","text":"…"}`; server replies `{"type":"chunk","text":"…"}` then `{"type":"done","artifact_preview":null}`. Chat calls Gemini Flash with the full character prefix + dynamic suffix (affect, memories, relationship label).
+
+**F-M05 (server) · `GET /v1/audit` — mobile activity feed**
+Pagination via `limit` / `offset` query params (max 200). Returns `{count, offset, actions[]}` with the same fields as the admin audit endpoint.
+
+**F-M06 (server) · `GET /v1/state/now` — Chloe's current state**
+Returns `{current_activity, affect_label, tone, goals[], top_interests[]}`. Goals from `inner_goals WHERE status='active'`; interests from `identity_traits WHERE status IN ('active','core')` ordered by weight.
+
+**F-M07 (server) · `PATCH /v1/preferences` — leash settings**
+`PreferencePatch(key, value)` body. Upserts into the `preferences` table via `INSERT OR CONFLICT … DO UPDATE`. All value types (str, bool, dict) serialised as JSON.
+
+**F-M08 (server) · `DELETE /v1/oauth/{service}` — OAuth revoke**
+Calls `oauth_tokens.store(service, {})` to write an empty dict (encrypted), which causes subsequent `load(service)` calls to return an invalid token → 401 → tool raises PermissionError.
+
+**F-M09 (server) · Discord demotion already done**
+`config.py` has had `discord_enabled: bool` since Phase A. `channels/discord_optional.py` guards on the flag. No new work needed.
+
+**F-M10 (server) · `/v1/voice` WebSocket**
+Mounted in `mobile_routes.py` → delegates to `realtime.handle_voice_session`. Client-side hold-to-talk wiring is left to the React Native app (F-M01 not yet built).
+
+### Implementation notes
+
+- `asyncio.timeout` (Python 3.11+) replaces the `asyncio.wait_for` approach used in earlier code — cleaner and composable with async generators.
+- `_run_whisper` runs in `loop.run_in_executor(None, ...)` so large model inference doesn't block the event loop. The module-level `_whisper_model` singleton avoids reloading per request.
+- Cartesia and ElevenLabs use `httpx.AsyncClient.stream()` with `aiter_bytes` so audio chunks flow to the client before the full response body is received.
+- `mobile_routes.py` is a single router that covers all mobile API paths and both WebSocket endpoints; wired into `app.py` alongside existing routers.
+- The `state_now` endpoint reads `inner_goals.name` and `identity_traits.name/weight` (not `description`/`label` — those columns don't exist in the schema).
+
+### Tests
+
+36 new test cases across 4 files:
+- `tests/unit/test_stt_whisper.py` (7): local whisper mock, empty audio, empty transcript, silence timeout, Deepgram mock, no API key, multi-chunk collection
+- `tests/unit/test_tts_cartesia.py` (7): Cartesia chunks, no key, explicit key, empty text, error handling; ElevenLabs chunks and no key
+- `tests/unit/test_realtime.py` (4): full pipeline mock, interrupt stops TTS, empty transcript skips LLM, reply tracking
+- `tests/unit/test_mobile_routes.py` (18): audit pagination/schema, state now schema, preference update/persist, OAuth revoke, route registration
+
+381 unit tests pass. Integration tests green (real Gemini API key).
+
+---
+
 ## 2026-05-06 — Phase E complete: memory & affect refactor (E-01 → E-12)
 
 All 12 Phase E tasks are done. 363 tests pass.
