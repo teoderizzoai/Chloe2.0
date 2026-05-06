@@ -32,3 +32,7 @@ class GeminiClient:
     async def flash(self, prompt_file: str, context: dict, schema) -> dict | None:
         log.warning("gemini_client_stub_called", prompt_file=prompt_file)
         return None
+
+
+def get_client() -> GeminiClient:
+    return GeminiClient()

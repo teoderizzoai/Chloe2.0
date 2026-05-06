@@ -11,7 +11,8 @@ from pydantic import BaseModel, Field, field_serializer, model_validator
 AuthClass = Literal["free", "intimate", "kinetic", "kinetic-sensitive"]
 State = Literal[
     "proposed", "deliberating", "self_aborted", "suppressed_by_leash",
-    "awaiting_confirmation", "confirmed", "denied", "executed", "failed", "reverted"
+    "awaiting_confirmation", "confirmed", "denied", "executed", "failed", "reverted",
+    "held_back",
 ]
 
 _utcnow = lambda: datetime.now(timezone.utc)

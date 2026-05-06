@@ -56,7 +56,24 @@ async def submit(action: Action) -> ActionResult:
         log.info("gate_pii_blocked", action_id=action.id, reason=pii_reason)
         return ActionResult(suppressed=True, reason="pii_filter", action_id=action.id)
 
-    # 3. Deliberation stub (always proceeds) — D-01
+    # 3. Deliberation (D-01)
+    from chloe.actions.deliberate import deliberate, should_deliberate
+    if should_deliberate(action):
+        verdict = await deliberate(action)
+        if verdict and verdict.decision == "abort":
+            action.state = "held_back"
+            await audit.append(action)
+            await _store_held_back_memory(action, reason=verdict.reason)
+            record_action(action.tool, action.verb, "held_back")
+            record_held_back("deliberation")
+            log.info("gate_deliberation_abort", action_id=action.id, reason=verdict.reason)
+            return ActionResult(
+                executed=False, suppressed=True,
+                reason=f"Deliberation: {verdict.reason}",
+                action_id=action.id,
+            )
+        elif verdict and verdict.decision == "revise":
+            log.info("deliberation_revise_suggestion", action_id=action.id, reason=verdict.reason)
 
     # 4. Auth dispatch
     if action.authorization in ("free", "intimate"):

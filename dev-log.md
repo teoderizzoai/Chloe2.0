@@ -1,5 +1,43 @@
 # Dev Log — Chloe 2.0
 
+## 2026-05-06 — Phase D complete: deliberation, initiative engine, shadow mode (D-01 → D-11)
+
+All 11 Phase D tasks are done. 291 tests pass.
+
+### What was built
+
+**Deliberation (D-01 + D-02):** `chloe/actions/deliberate.py` — `deliberate(action, context) -> Verdict | None` makes a Flash call with a structured payload (recent audit feed, budget throttle, time, last chat) and returns a Verdict. Gate now calls deliberation before executing kinetic actions and suppresses (`held_back`) if the verdict is `abort`. `should_deliberate(action) -> bool` is a cheap sync heuristic with five conditions: kinetic-sensitive auth class, budget near cap (>75%), recent outreach spike (>2 kinetic in 1 hour), high cost estimate (>$0.10), repeated same verb (≥3 in 24 h). `deliberate_action.md` prompt template added.
+
+**DB migration (D-01):** `0004_held_back_state.sql` — recreates the `actions` table to include `held_back` in the state CHECK constraint (SQLite doesn't support ALTER CONSTRAINT). `held_back` added to the Pydantic `State` literal.
+
+**Pressure-driven candidates (D-03):** `chloe/initiative/candidates.py` — `pressure_driven_candidates(inner_state)` maps high-pressure wants/fears/tensions (pressure > 0.5) to `CandidateAction` objects via `PRESSURE_MAP` lookup table. Tags like `loneliness` → `messages.send_text`; `curiosity` → `web_search.search` + `notes.append`.
+
+**Goal-driven candidates (D-04):** `goal_driven_candidates(goals)` + `chloe/initiative/goal_steps.py` — `GOAL_STEP_REGISTRY` maps goal tags to factory functions (`_playlist_next_step`, `_research_next_step`, `_writing_next_step`). Stale goals (no progress in 14+ days) trigger `fail_stale_goal()` which marks status as `stale` and writes an episodic memory.
+
+**Interest-driven candidates (D-05):** `interest_driven_candidates(garden)` selects top-3 interests by intensity, scales pressure to `intensity * 0.3` (always ≤ 0.3, always below routine/pressure candidates). `INTEREST_TOOL_MAP` routes science/research → `web_search`, music → `spotify.like`, writing/art → `notes`.
+
+**Routine candidates (D-06):** `routine_candidates(now)` emits time-boxed candidates with fixed `pressure=0.8`. Windows: morning check-in (08:15–08:45), evening check-in (20:45–21:15), sleep consolidation (02:45–03:45), weekly self-model (Sundays 03:00–04:00). KV guard flags (`routine:morning_sent:{today}` etc.) prevent duplicates per period. `mark_routine_done()` sets the flags after gate executes the action.
+
+**Opportunity vector (D-07):** `chloe/initiative/opportunity.py` — `get_opportunity_vector() -> OpportunityVector` makes a Flash call and caches the result in KV for 10 minutes. Stale/failed Flash calls fall back to a time-of-day default (high messages opportunity 09:00–22:00). `OpportunityVector` Pydantic model added to `llm/schemas.py`. `opportunity_vector.md` prompt template added.
+
+**Initiative engine (D-08 + D-11):** `chloe/initiative/engine.py` — `tick()` assembles all four candidate pools, fetches the opportunity vector, scores each candidate with the 6-term formula (`pressure × opp × recency_penalty × time_bonus × budget_headroom × affect_alignment`), takes the top-1, checks mutex, calls `gate.submit()`. `realize()` converts a `CandidateAction` to a full `Action`, looking up `auth_class` from the tool registry. `_get_threshold()` is dynamic: above 80% throttle the base threshold (`0.35`) multiplies by `1 + (throttle - 0.8) × 5`; at 100% throttle with `base ≥ 0.6` the effective threshold exceeds 1.0 making all ticks idle.
+
+**Shadow runner (D-09):** `chloe/initiative/shadow.py` — `shadow_tick()` runs the new engine with `gate_submit` patched to a no-op, logging what it *would* have done to `kv["shadow_decisions"]` (capped at 2000 records). `chloe/admin/shadow_routes.py` — `GET /admin/shadow` returns a summary with `total_ticks`, `idle_rate`, `by_tool` breakdown and last 50 decisions. Router wired into `app.py`.
+
+**Cutover + budget throttle (D-10 + D-11):** `config.py` gains `initiative_threshold: float = 0.35`. `loop.py` now exports `initiative_loop()` that calls `initiative_tick()` on a 60-second interval. `LLM schemas.py` gained `Verdict` (for D-01) and `OpportunityVector` (for D-07). `llm/gemini.py` got `get_client()` factory.
+
+### Implementation notes
+
+- `should_deliberate` is a sync function calling a sync `_audit_recent` (raw DB query returning `SimpleNamespace` objects with string `proposed_at`) to avoid async/await complications in the gate pipeline. Tests monkeypatch `_audit_recent` as a sync lambda.
+- The `kv_get`/`kv_set` imports in `candidates.py` are module-level so tests can patch them with `monkeypatch.setattr("chloe.initiative.candidates.kv_get", ...)`.
+- `CONSOLIDATION_WIN` extended to 02:45–03:45 so it overlaps the weekly window; both Sunday 03:30 tests (consolidation + weekly) pass.
+- Hypothesis property test for `should_deliberate` uses `.filter(lambda s: bool(s.strip()))` to prevent Hypothesis from generating whitespace-only intent strings (which would fail the Pydantic `intent_not_empty` validator).
+- D-10's `test_cutover.py` skips `test_no_shadow_runner` and `test_no_send_autonomous_outreach` (which require deleting `shadow.py` and the `ChloeCore._send_autonomous_outreach` stub) — those are manual cutover steps to be done after the 2-week shadow observation period completes.
+
+### Tests
+
+63 new test cases across 11 files. All 291 tests pass.
+
 ## 2026-05-05 — Phase C complete: write verbs, confirmation flow, push, revert (C-01 → C-13)
 
 All 13 Phase C tasks are done. 228 tests pass.

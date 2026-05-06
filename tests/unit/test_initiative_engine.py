@@ -1,0 +1,88 @@
+import pytest
+from unittest.mock import AsyncMock, patch, MagicMock
+from datetime import datetime
+from chloe.initiative.engine import tick, realize, _score_candidate
+from chloe.initiative.candidates import CandidateAction
+from chloe.llm.schemas import OpportunityVector
+
+
+def _make_candidate(tool="messages", verb="send_text", pressure=0.8, source="routine"):
+    return CandidateAction(
+        tool=tool, verb=verb, args={},
+        intent="Test intent",
+        pressure=pressure,
+        source=source,
+        source_id="test",
+    )
+
+
+def _neutral_opp():
+    return OpportunityVector(
+        messages=0.8, spotify=0.5, calendar=0.4,
+        notes=0.7, web_search=0.7, gmail=0.3, reminders=0.4,
+    )
+
+
+@pytest.mark.asyncio
+async def test_tick_below_threshold_returns_none(monkeypatch):
+    low_pressure = [_make_candidate(pressure=0.1)]
+    monkeypatch.setattr("chloe.initiative.engine.pressure_driven_candidates", lambda s: low_pressure)
+    monkeypatch.setattr("chloe.initiative.engine.goal_driven_candidates", lambda g: [])
+    monkeypatch.setattr("chloe.initiative.engine.interest_driven_candidates", lambda g: [])
+    monkeypatch.setattr("chloe.initiative.engine.routine_candidates", lambda n: [])
+    monkeypatch.setattr("chloe.initiative.engine.get_opportunity_vector", AsyncMock(return_value=_neutral_opp()))
+    monkeypatch.setattr("chloe.initiative.engine.throttle_level", lambda: 0.0)
+    monkeypatch.setattr("chloe.initiative.engine._load_inner_state_snapshot", lambda: {"goals": [], "interests": []})
+    monkeypatch.setattr("chloe.initiative.engine._load_affect", lambda: {})
+    monkeypatch.setattr("chloe.initiative.engine.audit_recent", AsyncMock(return_value=[]))
+    monkeypatch.setattr("chloe.initiative.engine._get_threshold", lambda: 0.35)
+
+    result = await tick()
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_tick_above_threshold_submits_to_gate(monkeypatch):
+    high_pressure = [_make_candidate(pressure=0.9, source="routine")]
+    mock_gate = AsyncMock(return_value=MagicMock(executed=True))
+
+    monkeypatch.setattr("chloe.initiative.engine.pressure_driven_candidates", lambda s: high_pressure)
+    monkeypatch.setattr("chloe.initiative.engine.goal_driven_candidates", lambda g: [])
+    monkeypatch.setattr("chloe.initiative.engine.interest_driven_candidates", lambda g: [])
+    monkeypatch.setattr("chloe.initiative.engine.routine_candidates", lambda n: [])
+    monkeypatch.setattr("chloe.initiative.engine.get_opportunity_vector", AsyncMock(return_value=_neutral_opp()))
+    monkeypatch.setattr("chloe.initiative.engine.throttle_level", lambda: 0.0)
+    monkeypatch.setattr("chloe.initiative.engine._load_inner_state_snapshot", lambda: {"goals": [], "interests": []})
+    monkeypatch.setattr("chloe.initiative.engine._load_affect", lambda: {})
+    monkeypatch.setattr("chloe.initiative.engine.audit_recent", AsyncMock(return_value=[]))
+    monkeypatch.setattr("chloe.initiative.engine._get_threshold", lambda: 0.35)
+    monkeypatch.setattr("chloe.initiative.engine.gate_submit", mock_gate)
+    monkeypatch.setattr("chloe.initiative.engine._tool_mutex_active", lambda t: False)
+    monkeypatch.setattr("chloe.initiative.engine.mark_routine_done", lambda s, n: None)
+
+    result = await tick()
+    assert result is not None
+    mock_gate.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_tick_mutex_blocks_action(monkeypatch):
+    high_pressure = [_make_candidate(tool="messages", pressure=0.9)]
+    mock_gate = AsyncMock(return_value=MagicMock(executed=True))
+
+    monkeypatch.setattr("chloe.initiative.engine.pressure_driven_candidates", lambda s: high_pressure)
+    monkeypatch.setattr("chloe.initiative.engine.goal_driven_candidates", lambda g: [])
+    monkeypatch.setattr("chloe.initiative.engine.interest_driven_candidates", lambda g: [])
+    monkeypatch.setattr("chloe.initiative.engine.routine_candidates", lambda n: [])
+    monkeypatch.setattr("chloe.initiative.engine.get_opportunity_vector", AsyncMock(return_value=_neutral_opp()))
+    monkeypatch.setattr("chloe.initiative.engine.throttle_level", lambda: 0.0)
+    monkeypatch.setattr("chloe.initiative.engine._load_inner_state_snapshot", lambda: {"goals": [], "interests": []})
+    monkeypatch.setattr("chloe.initiative.engine._load_affect", lambda: {})
+    monkeypatch.setattr("chloe.initiative.engine.audit_recent", AsyncMock(return_value=[]))
+    monkeypatch.setattr("chloe.initiative.engine._get_threshold", lambda: 0.35)
+    monkeypatch.setattr("chloe.initiative.engine._tool_mutex_active", lambda t: True)
+    monkeypatch.setattr("chloe.initiative.engine.gate_submit", mock_gate)
+
+    result = await tick()
+    assert result is None
+    mock_gate.assert_not_called()

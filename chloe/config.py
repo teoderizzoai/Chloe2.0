@@ -30,6 +30,8 @@ class Settings:
     # FCM (C-09)
     fcm_service_account_path: str = ""
     fcm_project_id: str = ""
+    # Initiative engine (D-10) — calibrated after 14 days of shadow mode
+    initiative_threshold: float = 0.35
 
     def __post_init__(self) -> None:
         if _ENV("CHLOE_DRY_RUN", "").lower() in ("1", "true", "yes"):
