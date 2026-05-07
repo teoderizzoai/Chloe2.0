@@ -1,5 +1,83 @@
 # Dev Log — Chloe 2.0
 
+## 2026-05-07 — Phase X complete: new tools, observability, ops, replay harness, humor (X-01 → X-08)
+
+30 new unit tests + 3 shadow tests, all passing. 8 PRD items done.
+
+### What was built
+
+**X-01 · `tools/weather.py` — WeatherTool**
+`WeatherTool` with two verbs: `current(lat, lon)` and `forecast(lat, lon, days)`. Backed by Open-Meteo (no API key). Both verbs `auth_class="free"`. WMO weather codes mapped to human-readable strings. Registered in ToolRegistry.
+
+**X-02 · `tools/maps.py` — MapsTool**
+`MapsTool` with four verbs: `find_place` (`free`), `directions`, `traffic_to`, `commute_estimate` (all `intimate`). Backed by Google Maps Platform. `"home"` resolves to configured `home_address`. Registered in ToolRegistry.
+
+**X-03 · `tools/code_runner.py` — CodeRunnerTool**
+`CodeRunnerTool` with one verb: `execute(language, code)` at `auth_class="kinetic"`. Firejail sandbox (Linux) or Docker fallback. Hard limits: 30s wall time, 256 MB RAM, 64 MB output. Returns `{stdout, stderr, exit_code, duration_ms}`.
+
+**X-04 · `tools/self_tools.py` — SelfToolsTool**
+`SelfToolsTool` with six verbs, all `free`: `set_quiet`, `set_focus`, `add_goal`, `add_want`, `update_preference`, `archive_trait`. Writes to `preferences`, `inner_goals`, `inner_wants`, `identity_traits`. Blocklist prevents `ha_blocklist`, `ha_allowlist`, `gmail_dont_send_to` from being overwritten. Migration `0007_trait_archive.sql` adds `archived` and `archive_reason` columns to `identity_traits`.
+
+**X-05 · Structlog + OTel tracing**
+`chloe/observability/tracing.py` — `init_tracing()` wires OTLP endpoint (no-op when unconfigured). `@traced("span_name")` decorator wraps async functions in OTel spans, injects `trace_id` into structlog context, records exceptions on span, clears `trace_id` on exit. `config.py` gains `otlp_endpoint`.
+
+**X-06 · `ops/bootstrap.sh` + `ops/backup.sh`**
+Idempotent Debian 12 provisioning: creates `chloe` user and directory structure, Python venv, clones repo, installs deps, writes systemd unit + Caddy service, configures UFW, sets up nightly backup cron and weekly Chroma rebuild cron, logrotate. `backup.sh` — hot SQLite copy + Chroma tar, keeps 14 backups. Both scripts pass `bash -n` syntax check.
+
+**X-07 · Replay harness for CI**
+`tests/shadow/replay.py` — `ReplayHarness` plays a JSON tape of events (time transitions, chat turns, initiative ticks, calendar events) over a test DB. `check_assertions()` verifies action counts, budget cap, leash violations, memory counts. `tests/shadow/tape_24h.json` — deterministic 24-hour tape. `tests/shadow/test_replay.py` — 3 shadow-marked tests (full replay, budget check, quiet-hours check). `tests/unit/test_replay_harness.py` — 3 unit tests for harness mechanics. `shadow` marker registered in pyproject.toml.
+
+**X-08 · Humor as seeded emergent trait + inside-joke memory**
+`chloe/identity/traits.py` — `record_humor_detection(kind, direction)` increments per-kind KV counter, seeds a candidate `identity_trait` (weight=0.3, status='emerging') when ≥4 detections within 14 days, idempotent. `HUMOR_KIND_TO_TRAIT` maps 5 humor kinds to trait names. `chloe/memory/inside_jokes.py` — `record_inside_joke(topic, snippet)` creates a `semantic` memory tagged `joke_topic:<topic>` or reinforces an existing one (+0.05 weight). `chloe/memory/retrieval.py` — `_apply_inside_joke_bonus()` adds 0.12 to retrieval score when query overlaps a joke topic tag.
+
+### Tests
+
+30 new unit tests + 3 shadow tests across 6 files, all passing. Total: 496 unit tests + 3 shadow tests pass.
+
+---
+
+## 2026-05-06 — Phase H complete: procedural memory, self-model, retention, CLI, metrics (H-01 → H-09)
+
+41 new unit tests, all passing. 9 PRD items done.
+
+### What was built
+
+**H-01 · `memory/procedural.py` — weekly procedural distillation**
+`distill_procedural()` queries denied/reverted/praised actions from the last 7 days, batches them (up to 10 per Flash call, max 3 batches), and stores each extracted `ProceduralRule` as a `kind="procedural"` memory via `memory.store.add()`. New schemas: `ProceduralRule` in `llm/schemas.py`. New prompt: `chloe/llm/prompts/procedural_distillation.md`.
+
+**H-02 · Procedural memory injected into deliberation**
+`deliberate.py` now calls `_get_procedural_memories(action)` before the LLM call. It runs `query_mixed(kinds_mix={"procedural": 3})` and injects the results as `procedural_hits` into the deliberation payload. Module-level import of `query_mixed` makes it patchable in tests. Retrieval errors return `[]` — deliberation continues normally.
+
+**H-03 · `identity/self_model.py` — weekly Pro pass**
+`run_weekly_self_model()` assembles a broad identity input pack (traits, goals, wants, fears, beliefs, affect, recent actions, held-back summary, voice drift context) and calls `pro_thinking("weekly_self_model.md", ...)` with `thinking_budget=8192`. Writes `self_narrative_belief` → `inner_beliefs` (confidence 0.5) and `next_week_intention` → `inner_goals`. New prompt: `chloe/llm/prompts/weekly_self_model.md`. New schema: `SelfModelOutput`.
+
+**H-04 · Thinking-budget calibration**
+`WEEKLY_PARAMS["thinking_config"]["thinking_budget"] = 8192` and `DELIBERATION_THINKING_BUDGET = 512` both have calibration comments in source (date, budgets tested, reason for choice).
+
+**H-05 · Memory retention tier promoter**
+`memory/retention.py` — `run_retention_job(dry_run=False)` runs daily at 04:30. Moves `hot` memories older than 90 days → `warm` by clustering them in batches of 10 (one Flash call per batch → one `ClusterSynthesis` summary stored as `archived_tier="warm"`). Moves `warm` memories older than 2 years → `cold` and removes them from Chroma. `dry_run=True` makes no DB changes. New schema: `ClusterSynthesis`. New prompt: `chloe/llm/prompts/cluster_synthesis.md`. `memory.store.add()` gains `archived_tier` parameter.
+
+**H-06 · `chloe rebuild-chroma` CLI command**
+`chloe/cli/commands.py` — Typer app with `rebuild-chroma` command. Re-embeds all `hot`/`warm` memories from SQLite into Chroma in batches with Rich progress bar. `--dry-run` shows count without writing. `--tier` and `--batch-size` flags. Registered as `chloe` entrypoint in `pyproject.toml`. `memory/store.py` gains `delete_from_chroma()`, `chroma_add()`, `chroma_count()` helpers.
+
+**H-07 · Prometheus metrics + alerts wiring**
+Added to `observability/metrics.py`: `chloe_budget_usd_today` (Gauge), `chloe_llm_errors_total` (Counter, `call_type` label), `chloe_chat_turns_total` (Counter), `chloe_voice_latency_seconds` (Histogram), `chloe_memory_writes_total` (Counter, `kind` label), `chloe_initiative_ticks_total` (Counter, `outcome` label), `chloe_db_migration_failures_total` (Counter). Wired: `chloe_memory_writes_total` on every `store.add()`, `chloe_initiative_ticks_total` on idle/action outcomes in `engine.py`, `chloe_llm_errors_total` on Flash/pro_thinking failures in `gemini.py`, `chloe_db_migration_failures_total` on migration exception in `db.py`. Alert rules: `ops/alerts/chloe.yml` (daily spend, LLM error rate, DB migration failure, pending confirmations > 1h).
+
+**H-08 · Phase H acceptance component tests**
+`tests/unit/test_h08_component.py` — verifies 3 reverted calendar actions produce a rule with "calendar" in tags, and a stored procedural memory is retrieved by `_get_procedural_memories()` for a matching action.
+
+**H-09 · Held-back memories as identity input + verbal voice evolution**
+`run_weekly_self_model()` now assembles `held_back_summary` (count_7d, count_30d, top_tools, themes, sample_notes) and `voice_drift_context` (last drift note from KV, recent Chloe chat replies). If `SelfModelOutput.restraint_reflection` is non-null, writes an `inner_belief` with confidence 0.45 and tags `["restraint", "self_image", "autobiographical"]`. If `voice_drift_note` is non-null, appends to `kv["voice_drift_notes"]` (capped at 3 entries).
+
+**`loop.py` updates**
+Added `daily_job_loop()` and `weekly_job_loop()` coroutines, plus `_run_daily_jobs()` (retention at 04:30) and `_run_weekly_jobs()` (`distill_procedural` + `run_weekly_self_model` on Sundays at 03:00).
+
+### Tests
+
+41 new unit tests across 9 files, all passing.
+
+---
+
 ## 2026-05-06 — Phase F complete: voice pipeline + mobile server routes (F-V01 → F-M10)
 
 All voice steps and server-side mobile routes are done. 381 unit tests pass. 19/20 integration tests pass (the one flaky failure is a deliberation abort on rapid message bursts — expected live API behaviour, not a regression).

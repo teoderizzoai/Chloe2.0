@@ -10,10 +10,30 @@ from chloe.actions.budget import throttle_level as _throttle_level
 from chloe.state.kv import get as kv_get
 from chloe.observability.logging import get_logger
 from chloe.observability.metrics import deliberation_calls_total
+from chloe.memory.retrieval import query_mixed
 
 log = get_logger("deliberate")
 
+# Calibrated 2026-05-06 against kinetic-sensitive email send scenarios.
+# 256: too brief, rationale often generic
+# 512: specific rationale, catches procedural rule violations
+# 1024: no meaningful improvement over 512, higher cost
+# Chosen: 512.
 DELIBERATION_THINKING_BUDGET = 512
+
+
+def _get_procedural_memories(action) -> list[dict]:
+    """Query top-3 procedural memories relevant to this action's tool/verb."""
+    q = f"{action.tool} {action.verb} {getattr(action, 'intent', '') or ''}"
+    try:
+        memories = query_mixed(rich_q=q, kinds_mix={"procedural": 3})
+        return [
+            {"content": m.text, "confidence": m.weight, "tags": m.tags}
+            for m in memories
+        ]
+    except Exception as exc:
+        log.warning("procedural_retrieval_error", error=str(exc))
+        return []
 
 
 async def deliberate(action, context: dict | None = None) -> Verdict | None:
@@ -23,6 +43,7 @@ async def deliberate(action, context: dict | None = None) -> Verdict | None:
     Returns Verdict or None (treat as proceed) on LLM failure.
     """
     context = context or {}
+    procedural_hits = _get_procedural_memories(action)
     recent_actions = await audit_recent(n=10)
     audit_feed = feed_text(recent_actions, n=10)
 
@@ -35,6 +56,7 @@ async def deliberate(action, context: dict | None = None) -> Verdict | None:
             "preview": action.preview,
             "auth_class": action.authorization,
         },
+        "procedural_hits": procedural_hits,
         "recent_audit": audit_feed,
         "budget_throttle": _throttle_level(),
         "time_of_day": datetime.now().strftime("%H:%M"),

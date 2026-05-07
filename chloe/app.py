@@ -9,6 +9,11 @@ from chloe.channels.revert_routes import router as revert_router
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Chloe 2.0")
+    
+    @app.get("/")
+    async def health():
+        return {"status": "ok"}
+    
     app.include_router(admin_router, prefix="/admin")
     app.include_router(shadow_router)
     app.include_router(confirm_router)

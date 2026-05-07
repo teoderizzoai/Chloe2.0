@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from chloe.state.db import get_connection
 from chloe.memory.retrieval import Memory, add_to_chroma
 from chloe.observability.logging import get_logger
+from chloe.observability.metrics import chloe_memory_writes_total
 
 log = get_logger("memory.store")
 
@@ -28,6 +29,7 @@ def add(
     weight: float = 1.0,
     salience: float = 0.5,
     confidence: float = 1.0,
+    archived_tier: str = "hot",
     collection_name: str = "memories_v2",
 ) -> int:
     """Insert into SQLite and ChromaDB. Returns the new memory id."""
@@ -36,8 +38,8 @@ def add(
         """
         INSERT INTO memories
           (kind, text, source, source_ref, tags, artifact_refs, weight, salience, confidence,
-           created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           archived_tier, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             kind,
@@ -49,12 +51,14 @@ def add(
             weight,
             salience,
             confidence,
+            archived_tier,
             datetime.now(timezone.utc).isoformat(),
             datetime.now(timezone.utc).isoformat(),
         ),
     )
     conn.commit()
     memory_id = cursor.lastrowid
+    chloe_memory_writes_total.labels(kind=kind).inc()
     add_to_chroma(
         memory_id=memory_id,
         text=text,
@@ -206,3 +210,33 @@ def _affect_hint(affect) -> str:
     if a > 0.7:
         return "energized"
     return "steady"
+
+
+def delete_from_chroma(memory_id: int, collection_name: str = "memories_v2") -> None:
+    """Remove a memory's embedding from Chroma."""
+    try:
+        from chloe.state.chroma import get_collection
+        collection = get_collection(collection_name)
+        collection.delete(ids=[str(memory_id)])
+    except Exception as exc:
+        log.warning("chroma_delete_failed", memory_id=memory_id, error=str(exc))
+
+
+def chroma_add(memory_id: int, text: str, kind: str = "semantic",
+               collection_name: str = "memories_v2") -> None:
+    """Add or update a memory's embedding in Chroma."""
+    from chloe.memory.retrieval import add_to_chroma
+    add_to_chroma(memory_id=memory_id, text=text, kind=kind,
+                  source="cluster_summary", artifact_refs=[],
+                  collection_name=collection_name)
+
+
+def chroma_count(collection_name: str = "memories_v2") -> int:
+    """Return total number of embeddings in Chroma collection."""
+    try:
+        from chloe.state.chroma import get_collection
+        collection = get_collection(collection_name)
+        return collection.count()
+    except Exception as exc:
+        log.warning("chroma_count_failed", error=str(exc))
+        return 0

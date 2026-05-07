@@ -1,4 +1,4 @@
-from prometheus_client import Counter, Gauge
+from prometheus_client import Counter, Gauge, Histogram
 from fastapi import APIRouter
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from fastapi.responses import Response
@@ -56,6 +56,45 @@ chloe_chroma_size = Gauge(
 chloe_kv_age_seconds = Gauge(
     "chloe_kv_age_seconds",
     "Seconds since the oldest kv entry was last updated",
+)
+
+chloe_budget_usd_today = Gauge(
+    "chloe_budget_usd_today",
+    "USD spent today",
+)
+
+chloe_llm_errors_total = Counter(
+    "chloe_llm_errors_total",
+    "LLM call failures after retries",
+    labelnames=["call_type"],
+)
+
+chloe_chat_turns_total = Counter(
+    "chloe_chat_turns_total",
+    "Total chat turns processed",
+)
+
+chloe_voice_latency_seconds = Histogram(
+    "chloe_voice_latency_seconds",
+    "Time to first audio byte in voice pipeline",
+    buckets=[0.5, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0],
+)
+
+chloe_memory_writes_total = Counter(
+    "chloe_memory_writes_total",
+    "Memory upsert operations",
+    labelnames=["kind"],
+)
+
+chloe_initiative_ticks_total = Counter(
+    "chloe_initiative_ticks_total",
+    "Initiative engine tick outcomes",
+    labelnames=["outcome"],
+)
+
+chloe_db_migration_failures_total = Counter(
+    "chloe_db_migration_failures_total",
+    "Database migration failures",
 )
 
 deliberation_calls_total = Counter(

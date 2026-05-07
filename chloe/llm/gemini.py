@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from chloe.observability.logging import get_logger
+from chloe.observability.metrics import chloe_llm_errors_total
 
 log = get_logger("llm.gemini")
 
@@ -77,6 +78,7 @@ class GeminiClient:
             return json.loads(resp.text)
         except Exception as e:
             log.warning("gemini_flash_failed", prompt_file=prompt_file, error=str(e))
+            chloe_llm_errors_total.labels(call_type=prompt_file).inc()
             return None
 
 
@@ -113,6 +115,7 @@ class GeminiClient:
             return json.loads(resp.text)
         except Exception as e:
             log.warning("gemini_pro_thinking_failed", prompt_file=prompt_file, error=str(e))
+            chloe_llm_errors_total.labels(call_type=prompt_file).inc()
             return None
 
 

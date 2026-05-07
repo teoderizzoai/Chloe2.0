@@ -16,6 +16,7 @@ DEFAULT_MIX: dict[str, int] = {
 }
 
 ANCHOR_BONUS = 0.05
+INSIDE_JOKE_BONUS = 0.12
 
 
 @dataclass
@@ -92,6 +93,7 @@ def query_mixed(
 
     if results:
         _apply_anchor_bonus(results)
+        _apply_inside_joke_bonus(results, rich_q)
 
     results.sort(key=lambda m: m.score, reverse=True)
     return results
@@ -141,6 +143,17 @@ def _build_memory(mem_id: int, meta: dict, score: float) -> Memory:
         archived_tier=row["archived_tier"],
         score=score,
     )
+
+
+def _apply_inside_joke_bonus(memories: list[Memory], query: str) -> None:
+    """Add INSIDE_JOKE_BONUS to inside-joke memories when the query overlaps their topic."""
+    for m in memories:
+        for tag in m.tags:
+            if tag.startswith("joke_topic:"):
+                topic = tag.removeprefix("joke_topic:")
+                if topic.lower() in query.lower():
+                    m.score += INSIDE_JOKE_BONUS
+                break
 
 
 def _apply_anchor_bonus(memories: list[Memory]) -> None:

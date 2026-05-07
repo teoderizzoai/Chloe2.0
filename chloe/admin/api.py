@@ -13,6 +13,59 @@ admin_router = APIRouter()
 
 log = get_logger("admin.oauth")
 
+
+ADMIN_INDEX_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Chloe — Admin</title>
+  <meta charset="utf-8">
+  <style>
+    body { font-family: sans-serif; background: #f5f5f5; padding: 40px; }
+    h1 { color: #333; }
+    .section { background: white; padding: 20px; margin: 20px 0; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+    a { color: #0066cc; text-decoration: none; padding: 10px 20px; display: inline-block; margin: 5px 0; border-radius: 4px; border: 1px solid #ddd; }
+    a:hover { background: #f0f0f0; }
+  </style>
+</head>
+<body>
+  <h1>Chloe 2.0 Admin</h1>
+  
+  <div class="section">
+    <h2>Monitoring</h2>
+    <a href="/admin/audit/ui">Audit Feed</a>
+    <a href="/admin/audit">Audit API (JSON)</a>
+    <a href="/admin/cache/status">Cache Status</a>
+    <a href="/metrics">Prometheus Metrics</a>
+  </div>
+  
+  <div class="section">
+    <h2>Integration Setup</h2>
+    <a href="/admin/oauth/google/start">Connect Google</a>
+    <a href="/admin/oauth/spotify/start">Connect Spotify</a>
+  </div>
+  
+  <div class="section">
+    <h2>Maintenance</h2>
+    <button onclick="resetCache()">Reset Cache</button>
+  </div>
+  
+  <script>
+    async function resetCache() {
+      const resp = await fetch('/admin/cache/reset', { method: 'POST' });
+      const data = await resp.json();
+      alert('Cache reset: ' + data.cache_name);
+    }
+  </script>
+</body>
+</html>
+"""
+
+
+@admin_router.get("/")
+async def admin_index():
+    return HTMLResponse(ADMIN_INDEX_HTML)
+
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_USERINFO = "https://www.googleapis.com/oauth2/v3/userinfo"

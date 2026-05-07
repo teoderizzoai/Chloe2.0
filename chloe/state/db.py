@@ -40,7 +40,15 @@ def migrate(db_path: Path | None = None, migrations_dir: Path | None = None) -> 
             continue
 
         sql = f.read_text(encoding="utf-8")
-        conn.executescript(sql)
+        try:
+            conn.executescript(sql)
+        except Exception:
+            try:
+                from chloe.observability.metrics import chloe_db_migration_failures_total
+                chloe_db_migration_failures_total.inc()
+            except Exception:
+                pass
+            raise
         conn.execute("INSERT INTO _migrations (filename) VALUES (?)", (f.name,))
         conn.commit()
         applied += 1

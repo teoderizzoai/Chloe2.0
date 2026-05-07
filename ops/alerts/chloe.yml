@@ -1,0 +1,39 @@
+groups:
+  - name: chloe
+    rules:
+
+      - alert: DailySpendExceedsCap
+        expr: chloe_budget_usd_today > 5.0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Chloe daily spend exceeds cap"
+          description: "chloe_budget_usd_today={{ $value | humanize }}. Check budget.py cap."
+
+      - alert: LLMErrorRateHigh
+        expr: rate(chloe_llm_errors_total[10m]) / (rate(chloe_chat_turns_total[10m]) + 0.001) > 0.2
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "LLM error rate > 20% over 10 minutes"
+          description: "Check Gemini API health and retry logic."
+
+      - alert: DBMigrationFailure
+        expr: chloe_db_migration_failures_total > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "DB migration failed at startup"
+          description: "chloe.db migration runner failed. Server may not be functional."
+
+      - alert: PendingConfirmationsTooLong
+        expr: chloe_pending_confirmations > 0
+        for: 60m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Confirmation ticket pending > 1 hour"
+          description: "A confirmation ticket has been pending for over an hour. Teo may not have received the push."

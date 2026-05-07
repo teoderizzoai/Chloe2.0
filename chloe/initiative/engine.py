@@ -15,6 +15,7 @@ from chloe.actions.schema import Action
 from chloe.config import get_settings
 from chloe.state.kv import get as kv_get, set as kv_set
 from chloe.observability.logging import get_logger
+from chloe.observability.metrics import chloe_initiative_ticks_total
 
 log = get_logger("initiative.engine")
 
@@ -80,10 +81,12 @@ async def tick() -> object | None:
 
     if best_score < threshold:
         log.info("tick_idle", best_score=round(best_score, 3))
+        chloe_initiative_ticks_total.labels(outcome="idle").inc()
         return None
 
     if _tool_mutex_active(best.tool):
         log.info("tick_mutex", tool=best.tool)
+        chloe_initiative_ticks_total.labels(outcome="idle").inc()
         return None
 
     action = realize(best, now)
@@ -92,6 +95,7 @@ async def tick() -> object | None:
     if result.executed and best.source == "routine":
         mark_routine_done(best.source_id, now)
 
+    chloe_initiative_ticks_total.labels(outcome="action").inc()
     log.info("tick_action_submitted", tool=action.tool, verb=action.verb,
              score=round(best_score, 3), result_executed=result.executed)
     return result

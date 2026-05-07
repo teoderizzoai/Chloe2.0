@@ -31,3 +31,24 @@ class GradeItem(BaseModel):
 
 class GradeResult(BaseModel):
     selected: list[GradeItem] = Field(default_factory=list)
+
+
+class ProceduralRule(BaseModel):
+    rule_text: str = Field(max_length=500, description="Concise actionable rule: 'When X, do/avoid Y'")
+    tool: str = Field(description="Primary tool this rule applies to")
+    tags: list[str] = Field(default_factory=list)
+    confidence: float = Field(ge=0.0, le=1.0, default=0.7)
+    valence: str = Field(default="avoid", description="'avoid' or 'prefer'")
+
+
+class SelfModelOutput(BaseModel):
+    self_narrative_belief: str = Field(max_length=1000)
+    next_week_intention: str = Field(max_length=500)
+    noted_contradictions: list[str] = Field(default_factory=list)
+    affect_drift_note: str | None = None
+    restraint_reflection: str | None = None
+    voice_drift_note: str | None = None
+
+
+class ClusterSynthesis(BaseModel):
+    summary: str = Field(max_length=1000)
