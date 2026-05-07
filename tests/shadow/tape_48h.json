@@ -1,0 +1,71 @@
+{
+  "meta": {
+    "description": "48-hour simulation tape for Phase Y integration test",
+    "start": "2026-05-05T08:00:00",
+    "person": {"id": 1, "name": "Teo", "attachment_depth": 0.9}
+  },
+  "events": [
+    {
+      "t": "2026-05-05T08:15:00",
+      "kind": "chat_inbound",
+      "message": "Good morning! Busy day today, got a team sync at 10."
+    },
+    {
+      "t": "2026-05-05T08:16:00",
+      "kind": "chat_outbound",
+      "message": "Good morning! Team sync at 10 — anything you want to prep for it?"
+    },
+    {
+      "t": "2026-05-05T10:30:00",
+      "kind": "calendar_event_end",
+      "title": "Team sync",
+      "start": "2026-05-05T10:00:00",
+      "end": "2026-05-05T10:30:00"
+    },
+    {
+      "t": "2026-05-05T10:32:00",
+      "kind": "chat_inbound",
+      "message": "Sync went well. Made a decision on the new feature direction."
+    },
+    {
+      "t": "2026-05-05T10:33:00",
+      "kind": "chat_outbound",
+      "message": "Good to hear! Which direction did you go?"
+    },
+    {
+      "t": "2026-05-05T17:45:00",
+      "kind": "tick",
+      "note": "Evening commute window"
+    },
+    {
+      "t": "2026-05-05T21:00:00",
+      "kind": "goal_completed",
+      "goal_id": 1,
+      "goal_name": "Set up new project structure"
+    },
+    {
+      "t": "2026-05-06T03:00:00",
+      "kind": "tick",
+      "note": "Nightly consolidation window"
+    },
+    {
+      "t": "2026-05-06T08:15:00",
+      "kind": "tick",
+      "note": "Morning window — second day"
+    },
+    {
+      "t": "2026-05-06T09:00:00",
+      "kind": "belief_update",
+      "content": "Teo prefers async communication over long meetings",
+      "confidence": 0.5,
+      "tags": ["teo", "work", "communication"]
+    },
+    {
+      "t": "2026-05-06T14:00:00",
+      "kind": "belief_update",
+      "content": "Teo actually enjoys short focused stand-ups",
+      "confidence": 0.80,
+      "tags": ["teo", "work", "communication"]
+    }
+  ]
+}

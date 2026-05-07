@@ -1,5 +1,49 @@
 # Dev Log — Chloe 2.0
 
+## 2026-05-07 — Phase Y complete: gap detection, unified retrieval, belief revision, affect continuity, curiosity, proactive intent, narrative timeline, 48h replay harness (Y-01 → Y-08)
+
+56 new unit tests + 3 shadow tests, all passing. 8 PRD items done.
+
+### What was built
+
+**Y-01 · `initiative/gaps.py` — Gap Detection Engine**
+`GapDetector` that scans person models, belief store, and active goals for missing or stale knowledge. Three gap types: `person` (field empty or >30 days stale), `belief` (confidence < 0.4, not revisited in 14 days), `goal` (active goal with `missing_context` and no progress in 7 days). Gaps surface as low-pressure `CandidateAction(tool="gap_flag")` — a synthetic tool that writes `pending_gap_hints` to KV for soft injection into the next chat turn. Migration `0008_y_schema.sql` adds `person_fields` table, `missing_context` column on `inner_goals`, `is_active` column on `persons`, new columns on `inner_beliefs`, and the `narrative_timeline` table.
+
+**Y-02 · `memory/cognitive_retrieval.py` — Unified Retrieval Engine**
+`retrieve(intent) -> CognitiveResult` consolidates all per-turn context into one call: ChromaDB memory query (20 results, kind-mixed), `person_fields` for each active person, top-10 active beliefs (confidence ≥ 0.3), affect checkpoint from KV, knowledge gaps (from Y-01), and keyword-based tension detection (3 contradiction pairs, capped at 3 tensions). Replaces scattered `query_mixed()` + belief queries in deliberation and chat. `retrieval_ms` always populated.
+
+**Y-03 · `inner/belief_revision.py` — Belief Revision Engine**
+`upsert_belief_with_revision(content, confidence, source, tags)` checks for overlapping beliefs (≥2 shared tags) before inserting. If the confidence delta exceeds 0.25, the old belief is archived (`archived=1`, `superseded_by=<new_id>`) and a new `autobiographical` memory is written: "I updated my understanding…". Epistemic helper `get_belief_confidence_summary(tags)` returns `avg_confidence` and `uncertain=True` when below 0.5. Writes a narrative entry (Y-07 integration) on every revision.
+
+**Y-04 · `affect/continuity.py` — Emotional Continuity Across Sessions**
+`save_checkpoint(valence, arousal, label)` serialises affect state to `kv["affect_checkpoint"]`. `restore_checkpoint()` reloads it and applies exponential decay: valence half-life 6h toward 0, arousal half-life 2h toward baseline 0.2. After 48h without contact, applies absence penalty (−0.10 valence). `apply_goal_completion_pulse()` adds +0.15 valence, +0.10 arousal (capped at 1.0) when a goal is completed.
+
+**Y-05 · `initiative/curiosity.py` — Curiosity Engine**
+`generate_curiosity_candidates()` scans `topic:` tags in episodic/chat memories, scores each topic by relationship depth × frequency × staleness, caps at 2 candidates per tick with max pressure 0.45. 7-day cooldown via `kv["curiosity_cooled_topics"]`. `mark_curiosity_surfaced(topic)` prevents re-surfacing. `curiosity_driven_candidates(is_idle=True)` wraps results as `gap_flag` CandidateActions for initiative engine integration.
+
+**Y-06 · `llm/proactive.py` — Predictive Intent Surfacing**
+`generate_proactive_offer(last_message, recent_topics, now)` scores candidate proactive offers from three sources: temporal patterns (morning 7:30–9:00, evening commute Mon–Fri, wind-down, lunch), calendar signals (upcoming event within 30 min → 0.70, past event within 2h → 0.65), and recency echoes (meeting/doctor/interview/flight/exam keywords → high confidence follow-ups). Returns best offer if confidence ≥ 0.55, respecting a 2-hour cooldown per topic. Engagement tracking (hits/misses) written to `kv["proactive_engagement_scores"]` for future de-weighting.
+
+**Y-07 · `identity/narrative.py` — Narrative Self-History**
+`append_narrative_entry(kind, title, body, valence, source)` writes to `narrative_timeline` table with kinds: `chapter`, `event`, `revision`, `trait_shift`, `affect_shift`. `get_my_story(window_days=30, max_entries=8)` returns a chronological first-person log (date-prefixed lines). `get_recent_chapter(max_chars=200)` returns the latest chapter entry, truncated, for character prefix injection. Integrated into Y-03 (revision entries) and Y-08 replay (goal completion entries).
+
+**Y-08 · `tests/shadow/tape_48h.json` + `test_replay_48h.py` — 48h Replay Harness**
+Deterministic 48-hour tape with 11 events: 4 chat turns, 1 calendar event end, 3 initiative ticks, 1 goal completion, 2 belief updates (the second triggers revision). Three shadow tests: (1) full replay asserts ≥4 memories, goal marked done, ≥1 narrative entry, ≥1 belief; (2) belief revision asserts archived belief and revision memory; (3) goal completion asserts narrative entry + affect pulse.
+
+### Schema additions (migration 0008_y_schema.sql)
+
+- `persons.is_active INTEGER NOT NULL DEFAULT 1`
+- `inner_beliefs`: `source TEXT`, `archived INTEGER DEFAULT 0`, `updated_at TEXT`, `superseded_by TEXT`, `supersedes TEXT`, `revision_note TEXT`
+- `inner_goals.missing_context TEXT`
+- `person_fields (id, person_id, field_name, value, updated_at)` — UNIQUE(person_id, field_name)
+- `narrative_timeline (id TEXT PK, kind, title, body, valence, source, source_ref, created_at)`
+
+### Tests
+
+56 new unit tests across 7 files, 3 new shadow tests. Total: 553 unit tests + 6 shadow tests pass.
+
+---
+
 ## 2026-05-07 — Phase X complete: new tools, observability, ops, replay harness, humor (X-01 → X-08)
 
 30 new unit tests + 3 shadow tests, all passing. 8 PRD items done.
