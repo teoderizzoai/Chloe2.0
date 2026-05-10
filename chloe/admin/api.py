@@ -1,8 +1,10 @@
 import base64
+from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Query
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from pydantic import BaseModel
 
 from chloe.actions import audit
 from chloe.config import get_settings
@@ -12,6 +14,8 @@ from chloe.state.oauth_tokens import store as store_token
 admin_router = APIRouter()
 
 log = get_logger("admin.oauth")
+
+_DASHBOARD_HTML = Path(__file__).resolve().parents[2] / "Chloe 2.0 _single file_.html"
 
 
 ADMIN_INDEX_HTML = """
@@ -64,6 +68,8 @@ ADMIN_INDEX_HTML = """
 
 @admin_router.get("/")
 async def admin_index():
+    if _DASHBOARD_HTML.exists():
+        return FileResponse(_DASHBOARD_HTML, media_type="text/html")
     return HTMLResponse(ADMIN_INDEX_HTML)
 
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -197,7 +203,7 @@ async def spotify_oauth_callback(code: str = None, error: str = None, state: str
         return HTMLResponse("<h1>Error</h1><p>No code received.</p>", status_code=400)
 
     s = get_settings()
-    secret_val = s.spotify_client_secret.get_secret_value() if s.spotify_client_secret else ""
+    secret_val = s.spotify_client_secret if s.spotify_client_secret else ""
     creds = base64.b64encode(f"{s.spotify_client_id}:{secret_val}".encode()).decode()
 
     async with httpx.AsyncClient() as client:
@@ -294,7 +300,7 @@ async def google_oauth_callback(code: str = None, error: str = None):
                 "code": code,
                 "redirect_uri": s.google_redirect_uri,
                 "client_id": s.google_client_id,
-                "client_secret": s.google_client_secret.get_secret_value() if s.google_client_secret else "",
+                "client_secret": s.google_client_secret if s.google_client_secret else "",
             },
         )
 
@@ -318,3 +324,59 @@ async def google_oauth_callback(code: str = None, error: str = None):
         <p>Scopes: Gmail (readonly + modify), Calendar Events</p>
         <p><a href="/admin/">Back to admin</a></p>
     """)
+
+
+# ── Memory management ─────────────────────────────────────────────────────────
+
+class MemoryInject(BaseModel):
+    text: str
+    kind: str = "episodic"
+    source: str = "admin_inject"
+    salience: float = 0.8
+    weight: float = 1.0
+
+
+@admin_router.post("/memories/inject")
+async def inject_memory(body: MemoryInject) -> dict:
+    from chloe.memory import store as mem_store
+    memory_id = mem_store.add(
+        kind=body.kind,
+        text=body.text,
+        source=body.source,
+        salience=body.salience,
+        weight=body.weight,
+    )
+    log.info("memory_injected", id=memory_id, kind=body.kind)
+    return {"id": memory_id, "kind": body.kind, "text": body.text}
+
+
+@admin_router.get("/memories")
+async def list_memories(limit: int = Query(20, le=200)) -> dict:
+    from chloe.state.db import get_connection
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT id, kind, text, weight, salience, source, created_at FROM memories ORDER BY id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return {
+        "count": len(rows),
+        "memories": [dict(r) for r in rows],
+    }
+
+
+@admin_router.get("/live/recent")
+async def live_recent() -> dict:
+    from chloe.observability import live_buffer
+    return live_buffer.snapshot()
+
+
+@admin_router.delete("/memories/{memory_id}")
+async def delete_memory(memory_id: int) -> dict:
+    from chloe.state.db import get_connection
+    from chloe.memory.store import delete_from_chroma
+    conn = get_connection()
+    conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+    conn.commit()
+    delete_from_chroma(memory_id)
+    log.info("memory_deleted", id=memory_id)
+    return {"deleted": memory_id}

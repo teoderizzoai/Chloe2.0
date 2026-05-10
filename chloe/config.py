@@ -16,7 +16,7 @@ class Settings:
     chloe_master_key_file: Path | None = None
     spotify_client_id: str = ""
     spotify_client_secret: object = None
-    spotify_redirect_uri: str = "http://localhost:8000/admin/oauth/spotify/callback"
+    spotify_redirect_uri: str = "http://127.0.0.1:8000/admin/oauth/spotify/callback"
     google_client_id: str = ""
     google_client_secret: object = None
     google_redirect_uri: str = "http://localhost:8000/admin/oauth/google/callback"
@@ -55,8 +55,16 @@ class Settings:
             self.chloe_workspace_dir = Path(env_path)
         if key_file := _ENV("CHLOE_MASTER_KEY_FILE"):
             self.chloe_master_key_file = Path(key_file)
+        if v := _ENV("SPOTIFY_CLIENT_ID"):
+            self.spotify_client_id = v
+        if v := _ENV("SPOTIFY_CLIENT_SECRET"):
+            self.spotify_client_secret = v
         if redirect_uri := _ENV("SPOTIFY_REDIRECT_URI"):
             self.spotify_redirect_uri = redirect_uri
+        if v := _ENV("GOOGLE_CLIENT_ID"):
+            self.google_client_id = v
+        if v := _ENV("GOOGLE_CLIENT_SECRET"):
+            self.google_client_secret = v
         if redirect_uri := _ENV("GOOGLE_REDIRECT_URI"):
             self.google_redirect_uri = redirect_uri
         if tz := _ENV("CHLOE_TIMEZONE"):

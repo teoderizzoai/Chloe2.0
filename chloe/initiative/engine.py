@@ -7,6 +7,7 @@ from chloe.initiative.candidates import (
     interest_driven_candidates, routine_candidates, CandidateAction,
     mark_routine_done,
 )
+from chloe.initiative.curiosity import curiosity_driven_candidates, mark_curiosity_surfaced
 from chloe.initiative.opportunity import get_opportunity_vector
 from chloe.actions.budget import throttle_level
 from chloe.actions.audit import recent as audit_recent
@@ -16,6 +17,7 @@ from chloe.config import get_settings
 from chloe.state.kv import get as kv_get, set as kv_set
 from chloe.observability.logging import get_logger
 from chloe.observability.metrics import chloe_initiative_ticks_total
+from chloe.observability import live_buffer
 
 log = get_logger("initiative.engine")
 
@@ -25,14 +27,19 @@ log = get_logger("initiative.engine")
 # Interest-driven rarely fired (pressure≈0.21, well below threshold).
 # Raised from 0.28 to 0.35 to reduce duplicate music actions.
 INITIATIVE_THRESHOLD = 0.35
+# Tools that have no kinetic effect (read-only or local write) get a much lower bar.
+FREE_TOOLS = {"web_search", "notes"}
+FREE_THRESHOLD_RATIO = 0.40   # 0.35 → 0.14 effective for free tools
 
 
-def _get_threshold() -> float:
+def _get_threshold(candidate: "CandidateAction | None" = None) -> float:
     """
     Dynamic threshold: rises linearly above 80% budget usage.
-    At 100% throttle with base>=0.6, effective threshold exceeds 1.0 → always idle.
+    Free tools (web_search, notes) use a lower base so they fire more readily.
     """
     base_threshold = getattr(get_settings(), "initiative_threshold", INITIATIVE_THRESHOLD)
+    if candidate is not None and candidate.tool in FREE_TOOLS:
+        base_threshold = base_threshold * FREE_THRESHOLD_RATIO
     throttle = throttle_level()
     if throttle > 0.8:
         multiplier = 1.0 + (throttle - 0.8) * 5.0
@@ -48,7 +55,7 @@ def _get_threshold() -> float:
 async def tick() -> object | None:
     """Run one initiative tick. Returns gate ActionResult or None if idle."""
     now = datetime.now()
-    threshold = _get_threshold()
+    threshold = _get_threshold()  # base threshold; per-candidate threshold applied below
 
     inner_state = _load_inner_state_snapshot()
     candidates = (
@@ -56,16 +63,29 @@ async def tick() -> object | None:
         + goal_driven_candidates(inner_state.get("goals"))
         + interest_driven_candidates(inner_state.get("interests"))
         + routine_candidates(now)
+        + curiosity_driven_candidates()
     )
+
+    affect = _load_affect()
+    live_buffer.record_affect({
+        "valence": affect.get("valence"),
+        "arousal": affect.get("arousal"),
+        "dominance": affect.get("dominance"),
+        "label": affect.get("label"),
+        "current_activity": (inner_state or {}).get("current_activity"),
+    })
 
     if not candidates:
         log.debug("tick_idle_no_candidates")
+        live_buffer.record_tick({
+            "outcome": "idle_no_candidates", "threshold": round(threshold, 3),
+            "candidate_count": 0, "best": None, "affect": affect,
+        })
         return None
 
     opp = await get_opportunity_vector()
 
     recent = await audit_recent(n=50)
-    affect = _load_affect()
 
     scored = []
     for c in candidates:
@@ -79,25 +99,62 @@ async def tick() -> object | None:
               best_score=round(best_score, 3), threshold=threshold,
               candidates=len(scored))
 
-    if best_score < threshold:
+    best_summary = {
+        "tool": best.tool, "verb": best.verb, "intent": best.intent,
+        "score": round(best_score, 3), "source": getattr(best, "source", None),
+    }
+
+    effective_threshold = _get_threshold(best)
+    if best_score < effective_threshold:
         log.info("tick_idle", best_score=round(best_score, 3))
         chloe_initiative_ticks_total.labels(outcome="idle").inc()
+        live_buffer.record_tick({
+            "outcome": "idle_below_threshold", "threshold": round(effective_threshold, 3),
+            "candidate_count": len(scored), "best": best_summary, "affect": affect,
+        })
         return None
 
     if _tool_mutex_active(best.tool):
         log.info("tick_mutex", tool=best.tool)
         chloe_initiative_ticks_total.labels(outcome="idle").inc()
+        live_buffer.record_tick({
+            "outcome": "mutex_blocked", "threshold": round(threshold, 3),
+            "candidate_count": len(scored), "best": best_summary, "affect": affect,
+        })
         return None
 
     action = realize(best, now)
-    result = await gate_submit(action)
 
-    if result.executed and best.source == "routine":
-        mark_routine_done(best.source_id, now)
+    if action.tool == "messages" and not action.args.get("body", "").strip():
+        body = await _compose_message_body(action, inner_state, affect)
+        if not body:
+            log.warning("tick_compose_failed", intent=best.intent)
+            if best.source == "routine":
+                mark_routine_done(best.source_id, now)
+            return None
+        action.args["body"] = body
 
-    chloe_initiative_ticks_total.labels(outcome="action").inc()
-    log.info("tick_action_submitted", tool=action.tool, verb=action.verb,
-             score=round(best_score, 3), result_executed=result.executed)
+    result = None
+    try:
+        result = await gate_submit(action)
+        chloe_initiative_ticks_total.labels(outcome="action").inc()
+        log.info("tick_action_submitted", tool=action.tool, verb=action.verb,
+                 score=round(best_score, 3), result_executed=result.executed)
+        live_buffer.record_tick({
+            "outcome": "action_executed" if result.executed else "action_suppressed",
+            "threshold": round(threshold, 3), "candidate_count": len(scored),
+            "best": best_summary, "affect": affect,
+            "executed": bool(result.executed),
+            "error": getattr(result, "error", None),
+        })
+    finally:
+        # Mark source done regardless of gate outcome or exception.
+        if best.source == "routine":
+            mark_routine_done(best.source_id, now)
+        elif best.source == "curiosity":
+            topic = best.source_id.removeprefix("curiosity:")
+            mark_curiosity_surfaced(topic)
+
     return result
 
 
@@ -177,6 +234,38 @@ def _load_affect() -> dict:
         return dict(row) if row else {}
     except Exception:
         return {}
+
+
+async def _compose_message_body(action: Action, inner_state: dict, affect: dict) -> str | None:
+    """Call the LLM to write the actual message body from the action's intent."""
+    from chloe.llm.gemini import get_client as get_llm
+    from chloe.llm.schemas import MessageBody
+
+    wants_summary = "; ".join(
+        w.get("text", "")[:60] for w in inner_state.get("wants", [])[:2]
+    ) or "nothing specific"
+
+    context = {
+        "intent": action.intent,
+        "time_of_day": datetime.now().strftime("%H:%M"),
+        "day_of_week": datetime.now().strftime("%A"),
+        "affect_label": affect.get("label", "neutral"),
+        "valence": round(affect.get("valence", 0.0), 2),
+        "arousal": round(affect.get("arousal", 0.5), 2),
+        "wants_summary": wants_summary,
+        "last_chat_seen": kv_get("last_chat_seen", default="unknown"),
+    }
+
+    llm = get_llm()
+    try:
+        result = await llm.flash("compose_message.md", context, schema=MessageBody)
+        if result is None:
+            return None
+        body = result.get("body", "") if isinstance(result, dict) else getattr(result, "body", "")
+        return body.strip() or None
+    except Exception as exc:
+        log.warning("compose_message_failed", error=str(exc))
+        return None
 
 
 def realize(candidate: CandidateAction, now: datetime | None = None) -> Action:

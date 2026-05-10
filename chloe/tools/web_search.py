@@ -64,7 +64,8 @@ class WebSearchTool(Tool):
                 reversibility=1.0,
                 cost_per_call_usd=0.001,
                 description_for_model=(
-                    "Search the web. Use for your own curiosity or to research a topic. "
+                    "Search the public web (Google/Bing-style). Use ONLY for general knowledge, news, or research. "
+                    "Do NOT use for Teo's personal data — for email use gmail.*, music use spotify.*, calendar use calendar.*. "
                     "Do NOT include names of people from your contact list."
                 ),
                 description_for_human="Web search",

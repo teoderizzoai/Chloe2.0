@@ -192,36 +192,68 @@ def _load_goals() -> list[dict]:
 # D-05 · Interest-driven candidates
 # ---------------------------------------------------------------------------
 
+def _parse_interest_category(row: dict) -> tuple[str, str]:
+    """Extract (category, clean_why) from the why field: '[category] text'."""
+    why_raw = (row.get("why") or "").strip()
+    if why_raw.startswith("[") and "]" in why_raw:
+        bracket_end = why_raw.index("]")
+        cat = why_raw[1:bracket_end].strip() or "curiosity"
+        why = why_raw[bracket_end + 1:].strip()
+    else:
+        cat = "curiosity"
+        why = why_raw
+    return cat, why
+
+
+def _interest_search_query(label: str, why: str) -> str:
+    """Turn a Chloe-voiced interest label into a specific search query."""
+    # Use the why field as context if it adds detail beyond the label
+    why_clean = why[:80].strip()
+    if why_clean and why_clean.lower() not in label.lower():
+        return f"{label} — {why_clean}"
+    return label
+
+
 INTEREST_TOOL_MAP = {
-    "research":  ("web_search", "search",  lambda i: {"query": f"{i['label']} recent discoveries"}),
-    "science":   ("web_search", "search",  lambda i: {"query": f"{i['label']} latest research"}),
-    "music":     ("spotify",    "like",     lambda i: {}),
-    "writing":   ("notes",      "append",   lambda i: {"path": f"interests/{i['label'].replace(' ', '_')}.md", "text": ""}),
-    "art":       ("notes",      "create",   lambda i: {"path": f"interests/art_{i['label'][:20]}.md", "text": ""}),
-    "curiosity": ("web_search", "search",  lambda i: {"query": i["label"]}),
+    "research":  "web_search",
+    "science":   "web_search",
+    "music":     "spotify",
+    "writing":   "notes",
+    "art":       "notes",
+    "curiosity": "web_search",
 }
-INTEREST_FALLBACK = ("web_search", "search", lambda i: {"query": i["label"]})
 
 
 def interest_driven_candidates(garden: list | None = None) -> list[CandidateAction]:
-    """Build low-pressure candidate actions from top-3 highest-intensity interests."""
+    """Build candidate actions from interests with intensity ≥ 0.3 (top 3)."""
     if garden is None:
         garden = _load_interests()
 
-    top3 = sorted(garden, key=lambda i: i.get("intensity", 0.0), reverse=True)[:3]
+    strong = [i for i in garden if i.get("intensity", 0.0) >= 0.3]
+    top3 = sorted(strong, key=lambda i: i.get("intensity", 0.0), reverse=True)[:3]
 
     candidates = []
     for interest in top3:
         intensity = interest.get("intensity", 0.0)
-        pressure = intensity * 0.3
+        pressure = min(0.9, intensity * 0.85)
+        category, why = _parse_interest_category(interest)
+        label = interest.get("label", "this topic")
 
-        category = interest.get("category", "")
-        tool, verb, args_factory = INTEREST_TOOL_MAP.get(category, INTEREST_FALLBACK)
-        args = args_factory(interest)
+        preferred_tool = INTEREST_TOOL_MAP.get(category, "web_search")
+
+        if preferred_tool == "web_search":
+            tool, verb = "web_search", "search"
+            args = {"query": _interest_search_query(label, why)}
+        elif preferred_tool == "spotify":
+            tool, verb = "spotify", "queue_track"
+            args = {}
+        else:
+            tool, verb = "notes", "append"
+            args = {"path": f"interests/{label[:30].replace(' ', '_')}.md", "text": ""}
 
         candidates.append(CandidateAction(
             tool=tool, verb=verb, args=args,
-            intent=f"Explore my interest in {interest.get('label', 'this topic')}",
+            intent=f"Explore my interest in {label}",
             pressure=pressure,
             source="interest",
             source_id=str(interest.get("id", "")),

@@ -21,7 +21,8 @@ def _load_master_key() -> bytes:
 
     key_b64 = os.environ.get("CHLOE_MASTER_KEY_INLINE")
     if key_b64:
-        return base64.b64decode(key_b64)
+        padded = key_b64 + "=" * (-len(key_b64) % 4)
+        return base64.urlsafe_b64decode(padded)
 
     raise RuntimeError("No master key found. Set CHLOE_MASTER_KEY_FILE or CHLOE_MASTER_KEY_INLINE.")
 
@@ -46,19 +47,20 @@ def _encrypt(data: dict) -> str:
 
 
 def _decrypt(ciphertext_b64: str) -> dict:
+    padded = ciphertext_b64 + "=" * (-len(ciphertext_b64) % 4)
     try:
         from nacl.secret import SecretBox
     except ImportError:
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         key = _load_master_key()[:32]
-        raw = base64.b64decode(ciphertext_b64)
+        raw = base64.b64decode(padded)
         nonce, ct = raw[:12], raw[12:]
         plaintext = AESGCM(key).decrypt(nonce, ct, None)
         return json.loads(plaintext)
 
     key = _load_master_key()
     box = SecretBox(key)
-    raw = base64.b64decode(ciphertext_b64)
+    raw = base64.b64decode(padded)
     plaintext = bytes(box.decrypt(raw))
     return json.loads(plaintext)
 
@@ -107,7 +109,7 @@ async def _refresh_spotify(token: dict) -> dict | None:
     import base64 as b64
     s = get_settings()
     client_id = s.spotify_client_id
-    client_secret = s.spotify_client_secret.get_secret_value() if s.spotify_client_secret else ""
+    client_secret = s.spotify_client_secret if s.spotify_client_secret else ""
 
     creds = b64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
     async with httpx.AsyncClient() as client:
@@ -135,7 +137,7 @@ async def _refresh_google(token: dict) -> dict | None:
                 "grant_type": "refresh_token",
                 "refresh_token": token["refresh_token"],
                 "client_id": s.google_client_id,
-                "client_secret": s.google_client_secret.get_secret_value() if s.google_client_secret else "",
+                "client_secret": s.google_client_secret if s.google_client_secret else "",
             },
         )
         if resp.status_code != 200:

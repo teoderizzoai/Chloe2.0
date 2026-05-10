@@ -154,13 +154,15 @@ async def _execute_and_record(action: Action) -> ActionResult:
 async def _create_action_memory(action: Action, artifact_refs: list) -> int | None:
     conn = get_connection()
     try:
+        result_snippet = _summarise_result(action.result)
+        text = f"I {action.verb} via {action.tool}. Goal: {action.intent}. Outcome: {result_snippet}"
         cursor = conn.execute(
             """
             INSERT INTO memories (kind, text, source, source_ref, artifact_refs, weight, tags, created_at)
             VALUES ('episodic', ?, 'action', ?, ?, 1.0, '["action"]', ?)
             """,
             (
-                action.intent,
+                text,
                 action.id,
                 json.dumps(artifact_refs),
                 datetime.now(timezone.utc).isoformat(),
@@ -172,6 +174,27 @@ async def _create_action_memory(action: Action, artifact_refs: list) -> int | No
     except Exception as exc:
         log.warning("action_memory_failed", error=str(exc))
         return None
+
+
+def _summarise_result(data: dict) -> str:
+    """Extract a short human-readable outcome from tool result data."""
+    if not data:
+        return "(no result data)"
+    # Prefer dedicated summary/text/message fields if present
+    for key in ("summary", "text", "message", "description", "result"):
+        if key in data and isinstance(data[key], str) and data[key].strip():
+            return data[key].strip()[:200]
+    # For lists (e.g. search results), count and show first title/snippet
+    for key in ("results", "items", "tracks", "events"):
+        if key in data and isinstance(data[key], list):
+            items = data[key]
+            if items and isinstance(items[0], dict):
+                first = items[0].get("title") or items[0].get("name") or items[0].get("snippet", "")
+                return f"{len(items)} {key}: first={str(first)[:80]}"
+            return f"{len(items)} {key}"
+    # Fallback: compact json
+    raw = json.dumps(data, ensure_ascii=False)
+    return raw[:200]
 
 
 async def _check_ha_allowlist(action: Action) -> str | None:
@@ -229,6 +252,23 @@ async def _store_pii_refusal_memory(action: Action, reason: str) -> None:
 
 async def _store_held_back_memory(action: Action, reason: str) -> None:
     conn = get_connection()
+    # Dedupe: if an identical (tool, verb, intent) held_back already exists in
+    # the last hour, skip insert to avoid loop pollution.
+    from datetime import datetime, timezone, timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    like_pat = f"I almost {action.verb} via {action.tool}.%Intent: {action.intent}"
+    existing = conn.execute(
+        """
+        SELECT id FROM memories
+        WHERE tags LIKE '%held_back%'
+          AND text LIKE ?
+          AND created_at >= ?
+        LIMIT 1
+        """,
+        (like_pat, cutoff),
+    ).fetchone()
+    if existing:
+        return
     text = f"I almost {action.verb} via {action.tool}. Held back: {reason}. Intent: {action.intent}"
     conn.execute(
         """

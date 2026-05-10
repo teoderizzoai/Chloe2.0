@@ -1,5 +1,136 @@
 # Dev Log — Chloe 2.0
 
+## 2026-05-10 — Autonomous initiative: interest threshold fix, message composition, curiosity wiring, ghost verb fixes
+
+### What was fixed
+
+**Interest candidates mathematically unable to fire (`chloe/initiative/candidates.py`)**
+Interest pressure was computed as `intensity * 0.3`, capping at 0.30 — below the 0.35 threshold even at full intensity. Interest-driven actions could never fire autonomously. Fixed: multiplier raised to `0.5`, giving a max score of 0.50 at full intensity. Low-intensity interests (< 0.70) still stay below threshold, which is correct.
+
+**Routine check-in loop (`chloe/initiative/engine.py`)**
+Evening check-in retried every tick for the full 30-minute window (20:45–21:15) — 9+ attempts logged as `held_back`. Root cause: `gate_submit` could raise or return before `mark_routine_done` was reached. Fixed: `gate_submit` is now wrapped in `try/finally` so `mark_routine_done` (and `mark_curiosity_surfaced` for curiosity candidates) always runs regardless of gate outcome or exception.
+
+**Messages sent with empty body (`chloe/initiative/engine.py`, new `chloe/llm/prompts/compose_message.md`)**
+All pressure-driven and routine candidates created `messages.send_text` with `args={"body": ""}`. The tool returns `success=False, error="body is required"` on empty body; deliberation also aborts when it sees no content. Fixed: engine now calls `_compose_message_body()` before gate when body is empty — a Flash LLM call that generates the actual message text from the action's intent, current affect, active wants, and last-chat-seen timestamp. Compose failure marks the routine done and returns `None` rather than sending an empty message.
+
+**`curiosity_driven_candidates` never called (`chloe/initiative/engine.py`, `chloe/initiative/curiosity.py`)**
+`curiosity.py` was fully implemented but never wired into `engine.tick()`. The `is_idle` gate inside the function was also redundant — the scoring threshold already handles that. Fixed: curiosity candidates added to the candidate pool in `tick()`; `is_idle` parameter removed; `mark_curiosity_surfaced` called in the `finally` block after gate resolves.
+
+**Curiosity candidates used phantom `gap_flag` tool (`chloe/initiative/curiosity.py`)**
+`curiosity_driven_candidates` emitted `tool="gap_flag", verb="surface"` — a tool that doesn't exist in the registry. These would silently fail with `"Unknown tool: gap_flag"` on execution. Fixed: curiosity candidates now emit `tool="messages", verb="send_text"` with the `question_framing` as the intent (body composed by engine before gate).
+
+**`self_tools.trigger_consolidation` / `trigger_weekly_self_model` were ghost verbs (`chloe/tools/self_tools.py`)**
+Both verbs were referenced in routine candidates (`candidates.py`) but not registered in `self_tools.verbs` or handled in `execute()` — they would return `"Unknown verb"` silently. Fixed: both verbs now registered as `auth_class="free"` with empty arg schemas, handled in `execute()`, and backed by `_trigger_consolidation()` → `reflect.nightly.run_nightly()` and `_trigger_weekly_self_model()` → `reflect.weekly.run_weekly()`. The nightly routine now actually runs memory consolidation, pressure decay, and interest garden decay at 03:00; the weekly routine runs procedural distillation + pro-thinking self-model update on Sundays.
+
+### What was added
+
+**`_compose_message_body()` (`chloe/initiative/engine.py`)**
+Async helper called before gate whenever `messages.send_text` has an empty body. Builds context from intent, time, affect label/valence/arousal, top-2 active wants, and `last_chat_seen`. Calls Flash with `compose_message.md`. Returns the composed string or `None` on failure.
+
+**`compose_message.md` prompt (`chloe/llm/prompts/compose_message.md`)**
+Flash prompt that instructs Chloe to write a 1–3 sentence message body in her voice (direct, dry wit, no "Hey!" openers, contractions always, don't start with "I"). Returns `{"body": "..."}`.
+
+**`MessageBody` schema (`chloe/llm/schemas.py`)**
+Pydantic model `MessageBody(body: str, max_length=500)` for compose Flash calls.
+
+---
+
+## 2026-05-10 — Bug fixes: tool access in chat, routine loop, memory pollution, dynamic verbs
+
+### What was fixed
+
+**Routine send_text loop (`chloe/initiative/engine.py`)**
+`mark_routine_done` was only called when `result.executed` was True. The evening check-in routine fired every tick during its 30-minute window (20:45–21:15), deliberation aborted each attempt, and the KV guard was never set — producing ~30 consecutive attempts. Fixed: `mark_routine_done` now fires on any resolution (executed, suppressed, or held_back).
+
+**Held-back memory pollution (`chloe/actions/gate.py`)**
+Every held-back action wrote a unique episodic memory row. The loop above produced 17 near-identical "I almost send_text via messages" rows. Fixed: `_store_held_back_memory` now checks for an existing row with the same `(tool, verb, intent)` within the last hour before inserting. Duplicate held-backs collapse to one row.
+
+**Chat has no tool access (`chloe/channels/mobile_ws.py`)**
+The mobile WebSocket was a pure LLM call — no function calling. Asking "what song is playing?" or "what's my last email?" would fail or fall back to web_search. Fixed: Gemini function calling wired end-to-end. `registry.gemini_tool_declarations()` is passed as `tools` on every chat turn. Model function calls are extracted, dispatched through `registry.execute`, and results returned as function_response parts (up to 4 hops). `kinetic-sensitive` verbs blocked in this path — they still require the gate confirmation flow. Tool calls logged with args and result for debugging.
+
+**Gmail search returns only IDs (`chloe/tools/gmail.py`)**
+`gmail.search` returned bare `[{id, threadId}]` — no content. Asking "what's my last job-related email?" required a second hop to `read_thread` which Gemini rarely chained. Fixed: `search` now fetches message metadata (subject, from, date, snippet) for each result, same as `read_recent`. Also improved `read_recent` description to clarify that `label` is a Gmail system label ID (INBOX/SENT/etc.), not a topic keyword — prevents the model choosing the wrong verb.
+
+**Web search hijacking personal data queries (`chloe/tools/web_search.py`, `chloe/tools/gmail.py`)**
+Model was choosing `web_search` for email and personal data questions. Fixed: `web_search.search` description now explicitly excludes personal data ("use gmail.* for email, spotify.* for music, calendar.* for calendar"); `gmail.read_recent` and `gmail.search` descriptions direct the model to use them for inbox questions.
+
+**Chat never persisted to memory (`chloe/channels/mobile_ws.py`)**
+User messages and replies existed only in the in-process `history` list (lost on disconnect). Telling Chloe something in chat left no trace. Fixed: every user turn is written as `kind='episodic', source='chat', salience=0.3, tags=["chat"]`. Low salience so chat fragments don't dominate retrieval, but they're available for grading and nightly consolidation to extract semantic facts from.
+
+**DB cleanup**
+Purged 550 `Memory content number N` test rows and 17 held-back loop rows. 17 real memories remain (16 admin-injected seed + 1 reflect). Backup saved as `chloe.db.bak.<ts>`.
+
+### What was added
+
+**`spotify.search` verb**
+Searches Spotify catalog by free-text query and returns `[{uri, name, artists, album}]`. Necessary to resolve song names to `spotify:track:...` URIs before queuing or playing.
+
+**`spotify.play_track` verb**
+Plays a single track immediately via `PUT /me/player/play` with `{"uris": [uri]}`. `start_playlist` only accepts `context_uri` (albums/playlists) — single tracks require this separate verb. Enables "play X right now" requests.
+
+**Dynamic verbs (`self_tools.define_verb`)**
+Chloe can now create or update verbs on any registered tool at runtime without a code deploy or restart.
+
+- Migration `0009_dynamic_verbs.sql` adds `dynamic_verbs (tool, verb, description, schema, code, auth_class, reversibility)` table with `UNIQUE(tool, verb)`.
+- `registry.load_dynamic_verbs()` reads the table and caches rows in `registry._dynamic`. Called at startup and immediately after `define_verb`.
+- `registry.execute()` checks `_dynamic` first; `gemini_tool_declarations()` includes dynamic verbs alongside static ones; `get_verb()` returns a synthetic `ToolVerb` for dynamic verbs so the chat auth-guard works.
+- Execution: code is `exec`'d in-process with `httpx`, `load_token`, `refresh_token`, `get_connection`, `json`, `log`, and `ToolResult` in the namespace. Code must define `async def run(args) -> ToolResult`. Compiled and validated (syntax + `run` presence) before DB write. Upserts on `(tool, verb)` so updates are non-destructive.
+- `self_tools.define_verb` verb: args are `tool`, `verb`, `description`, `schema` (JSON string), `code`, `auth_class`, `reversibility`. Validates tool exists, schema is valid JSON, code compiles and defines `run`. Hot-reloads registry on success.
+
+---
+
+## 2026-05-10 — Dashboard, memory injection, personality rewrite
+
+### What was built
+
+**Unified React dashboard (`frontend/src/App.tsx`)**
+Single-file frontend with four tabs served at `/ui/`. Sidebar shows Chloe's live mood, current activity, and active goals (polled from `/v1/state/now` every 15s).
+
+- **💬 Chat** — WebSocket chat to `/v1/mobile/ws`. Collapsible right panel for injecting fake memories (kind picker + text field). Connection status dot; auto-reconnects on drop.
+- **📡 Monitor** — Live audit feed (auto-refresh 5s). Pending confirmation tickets surface at the top with Allow/Deny buttons wired to `/v1/confirmations/{id}/confirm|deny`.
+- **🧠 Memories** — Full memory database view: inline inject form, kind filter chips (episodic/semantic/autobiographical/procedural), text search, weight column, delete button. Backed by three new admin endpoints.
+- **⚙️ Admin** — Cache reset, Google/Spotify OAuth connect, HomeAssistant allow/blocklist editor (PUT `/admin/ha/allowlist|blocklist`), raw endpoint links.
+
+**New backend endpoints (`chloe/admin/api.py`)**
+- `POST /admin/memories/inject` — writes a memory to SQLite + ChromaDB. Body: `{text, kind, source, salience, weight}`.
+- `GET /admin/memories?limit=N` — lists recent memories with all columns.
+- `DELETE /admin/memories/{id}` — removes from SQLite and ChromaDB.
+
+**Static file serving (`chloe/app.py`)**
+Mounts `static/ui/` at `/ui/` via `StaticFiles(html=True)` on startup if the directory exists.
+
+**Vite proxy config (`frontend/vite.config.ts`)**
+Already proxied `/v1`, `/admin`, `/metrics` to `localhost:8000` — no changes needed.
+
+**`.env` auto-load (`chloe.sh`)**
+`chloe.sh` now sources `.env` before exec so `GEMINI_API_KEY`, `CHROMA_PATH`, and all other env vars are available to the server process without manual `export`.
+
+---
+
+**ChromaDB persistence fix**
+`CHROMA_PATH=/home/teo-derizzo/Documents/Chloe/chroma_db` added to `.env`. Previously ChromaDB used `EphemeralClient` (in-memory), wiping all embeddings on every server restart. Now uses `PersistentClient`.
+
+**Startup memory sync (`chloe/app.py` → `_sync_memories_to_chroma`)**
+On every boot, compares SQLite `memories` rows against existing Chroma IDs and re-indexes any that are missing. Logged as `chroma_sync_complete {synced, total}`. Prevents divergence after DB restores or first-run with an existing SQLite file.
+
+**`n_results` clamping (`chloe/memory/retrieval.py`)**
+`query_mixed` now checks `collection.count()` before querying and caps `n_results = min(quota, total_count)`. ChromaDB raises when `n_results > collection size`; the old code caught this silently per-kind, returning an empty list and injecting no memories into chat.
+
+---
+
+**Conversation history (`chloe/channels/mobile_ws.py`)**
+`handle_mobile_ws` now maintains an in-session `history` list of `{role, parts}` dicts. Each turn appends user + model messages; the full history (capped at 40 turns) is passed as `contents` to Gemini on every call. Previously each message was sent in isolation — Chloe had no memory of anything said earlier in the same conversation.
+
+Single `genai.Client` created once per WebSocket connection instead of per message.
+
+**Character rewrite (`chloe/llm/prompts/character_prefix.md`)**
+Complete rewrite. Previous version: 3 generic sentences ("warm, perceptive, acts with genuine care"). New version defines:
+- A distinct voice: direct, dry wit, short sentences, contractions, no filler phrases
+- Specific anti-patterns she avoids: "Certainly!", "Great question!", trailing "let me know if...", bullet points as a default format
+- Opinions she'll share and pushback she'll give
+- Her relationship with Teo: she's noticed patterns, she's on his side but not a yes-machine
+- What she is not: not a customer-service assistant, not formal, not verbose
+
 ## 2026-05-07 — Phase Y complete: gap detection, unified retrieval, belief revision, affect continuity, curiosity, proactive intent, narrative timeline, 48h replay harness (Y-01 → Y-08)
 
 56 new unit tests + 3 shadow tests, all passing. 8 PRD items done.
