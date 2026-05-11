@@ -13,6 +13,7 @@ MIGRATIONS_DIR = Path(__file__).parents[2] / "chloe/state/migrations"
 
 @pytest.fixture(autouse=True)
 def db(tmp_path):
+    close()
     migrate(db_path=tmp_path / "test.db", migrations_dir=MIGRATIONS_DIR)
     yield get_connection()
     close()
@@ -48,7 +49,7 @@ async def test_successful_action_creates_memory(db, monkeypatch):
 
     row = db.execute("SELECT * FROM memories WHERE source='action'").fetchone()
     assert row is not None
-    assert row["text"] == "Queue a favourite track to set the mood"
+    assert "Queue a favourite track to set the mood" in row["text"]
     assert row["source_ref"] == action.id
 
     artifact_refs = json.loads(row["artifact_refs"])

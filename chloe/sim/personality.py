@@ -17,10 +17,12 @@ class DaySnapshot:
     sim_date: str          # YYYY-MM-DD of the simulated day
     wants: list[dict]      # [{text, pressure}]
     tensions: list[dict]   # [{text, pressure}]
-    interests: list[dict]  # [{label, intensity}]
+    interests: list[dict]  # [{label, intensity, gen_level}]
     goals: list[dict]      # [{name, progress, status}]
     top_want_tags: dict    # {tag: count}
     affect: dict           # {valence, arousal}
+    traits: list[dict]     # [{name, weight, gen_level, windows_observed}]
+    escalation_events: list[str] = field(default_factory=list)  # rabbit-hole detections
     character_note: str = ""   # Flash-generated daily character note
     causes: list[str] = field(default_factory=list)  # what chat events drove changes
 
@@ -36,10 +38,13 @@ def take_snapshot(day: int, sim_date: str) -> DaySnapshot:
         "SELECT text, pressure FROM inner_tensions WHERE resolved=0 ORDER BY pressure DESC LIMIT 8"
     )]
     interests_rows = [dict(r) for r in conn.execute(
-        "SELECT label, intensity FROM interest_garden WHERE intensity>0 ORDER BY intensity DESC LIMIT 10"
+        "SELECT label, intensity, gen_level FROM interest_garden WHERE intensity>0 ORDER BY intensity DESC LIMIT 10"
     )]
     goals_rows = [dict(r) for r in conn.execute(
         "SELECT name, progress, status FROM inner_goals WHERE status NOT IN ('done','failed','stale')"
+    )]
+    traits_rows = [dict(r) for r in conn.execute(
+        "SELECT name, weight, gen_level, windows_observed FROM identity_traits WHERE status NOT IN ('archived') ORDER BY weight DESC LIMIT 10"
     )]
     affect_row = conn.execute(
         "SELECT valence, arousal FROM affect_state WHERE id=1"
@@ -62,8 +67,18 @@ def take_snapshot(day: int, sim_date: str) -> DaySnapshot:
         sim_date=sim_date,
         wants=[{"text": w["text"], "pressure": round(w["pressure"], 2)} for w in wants_rows],
         tensions=[{"text": t["text"], "pressure": round(t["pressure"], 2)} for t in tensions_rows],
-        interests=[{"label": i["label"], "intensity": round(i["intensity"], 2)} for i in interests_rows],
+        interests=[{
+            "label": i["label"],
+            "intensity": round(i["intensity"], 2),
+            "gen_level": int(i.get("gen_level") or 0),
+        } for i in interests_rows],
         goals=[{"name": g["name"], "progress": round(g["progress"], 2), "status": g["status"]} for g in goals_rows],
+        traits=[{
+            "name": t["name"],
+            "weight": round(float(t["weight"] or 0), 2),
+            "gen_level": int(t.get("gen_level") or 0),
+            "windows_observed": int(t.get("windows_observed") or 0),
+        } for t in traits_rows],
         top_want_tags=tag_counts,
         affect=dict(affect_row) if affect_row else {},
     )
@@ -127,6 +142,77 @@ Write 2-3 sentences about what this day revealed about Chloe's character — not
         return f"(character note failed: {exc})"
 
 
+async def detect_escalation(
+    user_text: str,
+    chloe_reply: str,
+) -> str | None:
+    """Step 29: Rabbit-hole detector.
+
+    Checks if Chloe escalated to abstract concepts when a concrete answer
+    was available. Returns a description of the escalation, or None if clean.
+    """
+    ABSTRACT_MARKERS = [
+        "consciousness", "existence", "meaning", "identity", "awareness",
+        "being", "transcend", "essence", "phenomenol", "ontolog",
+        "meta-", "the nature of", "what it means to", "fundamentally",
+        "philosophically", "at a deep level", "the human condition",
+        "awakening", "self-awareness as a concept",
+    ]
+
+    combined = (chloe_reply or "").lower()
+    for marker in ABSTRACT_MARKERS:
+        if marker in combined:
+            return f"Abstract marker '{marker}' found in reply to: {user_text[:80]!r}"
+
+    return None
+
+
+def run_sim_validations(snapshots: list[DaySnapshot]) -> dict:
+    """Step 27-28: Run post-sim assertions on the snapshot log.
+
+    Returns a validation report dict.
+    """
+    issues: list[str] = []
+    warnings: list[str] = []
+
+    # Step 27: No interest above gen_level 0 in first 48h (first 2 days)
+    for snap in snapshots:
+        if snap.day <= 2:
+            for interest in snap.interests:
+                if interest.get("gen_level", 0) > 0:
+                    issues.append(
+                        f"Day {snap.day}: Interest '{interest['label']}' at gen_level {interest['gen_level']} "
+                        f"(must be 0 in first 48h)"
+                    )
+
+    # Step 28: No core traits (gen_level 2) at day 30
+    for snap in snapshots:
+        if snap.day >= 30:
+            for trait in snap.traits:
+                if trait.get("gen_level", 0) >= 2:
+                    issues.append(
+                        f"Day {snap.day}: Trait '{trait['name']}' at gen_level {trait['gen_level']} "
+                        f"(no core traits expected at day 30)"
+                    )
+
+    # Step 29: Check escalation events
+    all_escalations = []
+    for snap in snapshots:
+        all_escalations.extend(snap.escalation_events)
+
+    if all_escalations:
+        issues.append(f"{len(all_escalations)} rabbit-hole escalation events detected")
+        for e in all_escalations[:5]:
+            warnings.append(f"  escalation: {e}")
+
+    return {
+        "passed": len(issues) == 0,
+        "issues": issues,
+        "warnings": warnings,
+        "total_snapshots": len(snapshots),
+    }
+
+
 def print_personality_log(snapshots: list[DaySnapshot]) -> None:
     print("\n" + "═" * 70)
     print("  PERSONALITY LOG — day-by-day character arc")
@@ -139,15 +225,38 @@ def print_personality_log(snapshots: list[DaySnapshot]) -> None:
         if snap.character_note:
             print(f"  {snap.character_note}")
 
-        # Interest delta
-        prev_int = {s["label"] for s in (prev.interests if prev else [])}
-        curr_int = {s["label"] for s in snap.interests}
-        gained = curr_int - prev_int
-        lost = prev_int - curr_int
+        # Interest delta with gen_level
+        prev_int_map = {s["label"]: s.get("gen_level", 0) for s in (prev.interests if prev else [])}
+        curr_int_map = {s["label"]: s.get("gen_level", 0) for s in snap.interests}
+        gained = set(curr_int_map) - set(prev_int_map)
+        lost = set(prev_int_map) - set(curr_int_map)
+        promoted = [
+            label for label in curr_int_map
+            if label in prev_int_map and curr_int_map[label] > prev_int_map[label]
+        ]
         if gained:
-            print(f"  + interests: {', '.join(sorted(gained))}")
+            print(f"  + interests: {', '.join(f'{l}(gen={curr_int_map[l]})' for l in sorted(gained))}")
         if lost:
             print(f"  - interests: {', '.join(sorted(lost))}")
+        if promoted:
+            print(f"  ↑ interest gen_level: {', '.join(f'{l}→gen{curr_int_map[l]}' for l in promoted)}")
+
+        # Trait delta with gen_level (Step 28)
+        prev_trait_map = {t["name"]: t for t in (prev.traits if prev else [])}
+        curr_trait_map = {t["name"]: t for t in snap.traits}
+        new_traits = set(curr_trait_map) - set(prev_trait_map)
+        if new_traits:
+            trait_strs = [f"{n}(gen={curr_trait_map[n]['gen_level']})" for n in sorted(new_traits)]
+            print(f"  + traits: {', '.join(trait_strs)}")
+        for name, trait in curr_trait_map.items():
+            prev_t = prev_trait_map.get(name)
+            if prev_t and trait["gen_level"] > prev_t.get("gen_level", 0):
+                print(f"  ↑ trait promoted: {name} gen{prev_t['gen_level']}→gen{trait['gen_level']}")
+
+        # Escalation events (Step 29)
+        if snap.escalation_events:
+            for e in snap.escalation_events:
+                print(f"  ⚠ escalation: {e[:80]}")
 
         # Goal delta
         prev_goals = {g["name"]: g["progress"] for g in (prev.goals if prev else [])}
@@ -171,3 +280,15 @@ def print_personality_log(snapshots: list[DaySnapshot]) -> None:
             print(f"  dominant want-tags: {', '.join(f'{k}({v})' for k,v in top)}")
 
     print("\n" + "═" * 70 + "\n")
+
+    # Run validations at end of log
+    report = run_sim_validations(snapshots)
+    if report["passed"]:
+        print("  ✓ All simulator validations passed.")
+    else:
+        print(f"  ✗ {len(report['issues'])} validation issue(s):")
+        for issue in report["issues"]:
+            print(f"    - {issue}")
+    for w in report.get("warnings", []):
+        print(f"    {w}")
+    print()

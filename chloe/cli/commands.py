@@ -162,6 +162,48 @@ async def _rebuild_chroma_async(dry_run: bool, batch_size: int, tiers: list[str]
         rich.print("[green]Counts match — rebuild successful[/green]")
 
 
+@app.command("bootstrap-identity")
+def bootstrap_identity(
+    person_id: int = typer.Option(1, "--person-id", help="Person ID to bootstrap addendum for"),
+):
+    """Bootstrap the character addendum and first narrative timeline entry for a person.
+
+    Safe to run on a live DB. Makes one Flash call (addendum) and one Opus call
+    (narrative weaver). Run once manually after seeding the DB with real history.
+    """
+    asyncio.run(_bootstrap_identity_async(person_id))
+
+
+async def _bootstrap_identity_async(person_id: int) -> None:
+    import rich
+    from chloe.state.db import migrate, seed_primary_persons
+
+    migrate()
+    seed_primary_persons()
+
+    rich.print(f"[bold]Bootstrapping identity for person_id={person_id}[/bold]")
+
+    try:
+        from chloe.identity.character_addendum import update_addendum
+        result = await update_addendum(person_id=person_id)
+        if result:
+            rich.print(f"[green]Addendum written ({len(result)} chars)[/green]")
+        else:
+            rich.print("[yellow]Addendum: LLM returned nothing (no API key?)[/yellow]")
+    except Exception as exc:
+        rich.print(f"[red]Addendum failed: {exc}[/red]")
+
+    try:
+        from chloe.identity.narrative_weaver import weave_narrative
+        out = await weave_narrative()
+        if "error" in out:
+            rich.print(f"[yellow]Narrative: {out}[/yellow]")
+        else:
+            rich.print(f"[green]Narrative entry written: \"{out.get('period_label', '?')}\"[/green]")
+    except Exception as exc:
+        rich.print(f"[red]Narrative weaver failed: {exc}[/red]")
+
+
 @app.command("simulate-day")
 def simulate_day_cmd(
     hours: int = typer.Option(24, "--hours", help="Simulated hours to run (use 72 for 3 days, etc.)"),

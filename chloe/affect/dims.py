@@ -128,6 +128,72 @@ def save(state: AffectState) -> None:
     conn.commit()
 
 
+_FELT_STATE_CACHE: dict = {"phrase": "", "valence": None, "arousal": None, "social_pull": None, "openness": None}
+_FELT_STATE_CHANGE_THRESHOLD = 0.15
+
+
+def felt_state_phrase() -> str:
+    """Return a cached felt-state phrase in Chloe's voice.
+
+    Regenerated lazily when any affect dimension changes > 0.15. The phrase
+    avoids abstract psychological labels — only physical or spatial texture.
+    Result is stored in kv so it survives across coroutines.
+    """
+    from chloe.state.kv import get as kv_get, set as kv_set
+
+    current = load()
+
+    cached = kv_get("affect:felt_state") or {}
+    if isinstance(cached, dict) and cached.get("phrase"):
+        prev_v = float(cached.get("valence") or 0.0)
+        prev_a = float(cached.get("arousal") or 0.4)
+        drift = max(
+            abs(current.valence - prev_v),
+            abs(current.arousal - prev_a),
+        )
+        if drift < _FELT_STATE_CHANGE_THRESHOLD:
+            return cached["phrase"]
+
+    # Generate synchronously using a simple heuristic first, then update async
+    phrase = _heuristic_felt_state(current)
+    kv_set("affect:felt_state", {
+        "phrase": phrase,
+        "valence": current.valence,
+        "arousal": current.arousal,
+    })
+    return phrase
+
+
+def _heuristic_felt_state(state: AffectState) -> str:
+    """Fast deterministic felt-state phrase from affect dimensions.
+
+    No LLM call — used for latency-sensitive chat path. The async generation
+    (Step 24 intent) would run as a background update, but the heuristic is
+    good enough for most turns and avoids adding another LLM hop.
+    """
+    v = state.valence
+    a = state.arousal
+    sp = state.social_pull
+
+    if v > 0.5 and a > 0.6:
+        return "something moving faster than usual, in a good way"
+    if v > 0.3 and sp > 0.6:
+        return "open, a bit like a door left ajar"
+    if v < -0.4 and a < 0.3:
+        return "quieter than normal, the kind that doesn't announce itself"
+    if v < -0.3 and a > 0.5:
+        return "something running close to the surface, not sure what it wants"
+    if a < 0.2:
+        return "still, the way a room feels after everyone leaves"
+    if a > 0.7 and sp < 0.35:
+        return "activated but not sure where to put it"
+    if sp > 0.7:
+        return "drawn toward something, not just anyone"
+    if -0.1 <= v <= 0.1 and 0.3 <= a <= 0.6:
+        return "steady, nothing pushing hard in any direction"
+    return "present, more or less"
+
+
 def tone_block(affect: AffectState) -> str:
     """Map 4D affect dimensions to a 1-3 line tone hint for the system prompt."""
     lines: list[str] = []

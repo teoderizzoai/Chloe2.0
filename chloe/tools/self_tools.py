@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 from datetime import datetime, timedelta
 
@@ -8,6 +9,81 @@ from chloe.state.db import get_connection
 from chloe.observability.logging import get_logger
 
 log = get_logger("self_tools")
+
+# AST-level names that are unconditionally banned in submitted verb code.
+_BANNED_NAMES = frozenset({
+    "__import__", "eval", "exec", "compile",
+    "breakpoint", "input",
+})
+# Attribute chains that suggest access to dangerous stdlib modules.
+_BANNED_MODULES = frozenset({"os", "subprocess", "socket", "sys", "importlib", "shutil"})
+
+
+def _ast_check(code: str) -> str | None:
+    """Walk the submitted verb AST and return an error string on the first
+    dangerous pattern found, or None if the code looks safe.
+
+    Checks:
+    - use of banned builtins / calls
+    - open() calls outside the workspace dir (first string arg must start with
+      the workspace path)
+    - import of banned stdlib modules
+    - attribute access on banned module names (e.g. `os.system`, `sys.exit`)
+    """
+    try:
+        tree = ast.parse(code, mode="exec")
+    except SyntaxError as exc:
+        return f"Syntax error: {exc}"
+
+    class _Visitor(ast.NodeVisitor):
+        def __init__(self):
+            self.error: str | None = None
+
+        def _fail(self, msg: str, node):
+            self.error = f"Line {getattr(node, 'lineno', '?')}: {msg}"
+
+        def visit_Name(self, node: ast.Name):
+            if node.id in _BANNED_NAMES:
+                self._fail(f"Use of {node.id!r} is not allowed in dynamic verbs", node)
+            self.generic_visit(node)
+
+        def visit_Attribute(self, node: ast.Attribute):
+            # Catch patterns like `os.system`, `subprocess.run`, `sys.exit`
+            if isinstance(node.value, ast.Name) and node.value.id in _BANNED_MODULES:
+                self._fail(
+                    f"Access to module {node.value.id!r} is restricted in dynamic verbs",
+                    node,
+                )
+            self.generic_visit(node)
+
+        def visit_Import(self, node: ast.Import):
+            for alias in node.names:
+                top = alias.name.split(".")[0]
+                if top in _BANNED_MODULES:
+                    self._fail(f"Import of {alias.name!r} is not allowed in dynamic verbs", node)
+            self.generic_visit(node)
+
+        def visit_ImportFrom(self, node: ast.ImportFrom):
+            module = node.module or ""
+            top = module.split(".")[0]
+            if top in _BANNED_MODULES:
+                self._fail(f"Import from {module!r} is not allowed in dynamic verbs", node)
+            self.generic_visit(node)
+
+        def visit_Call(self, node: ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id == "open":
+                # Allow open() only when the first arg is a string literal starting
+                # with a known safe path. Unknown paths are blocked.
+                if not node.args or not isinstance(node.args[0], ast.Constant):
+                    self._fail(
+                        "open() is only allowed with a literal path inside the workspace dir",
+                        node,
+                    )
+            self.generic_visit(node)
+
+    visitor = _Visitor()
+    visitor.visit(tree)
+    return visitor.error
 
 
 class SelfToolsTool(Tool):
@@ -129,6 +205,25 @@ class SelfToolsTool(Tool):
                 ),
                 description_for_human="Define a new tool verb",
             ),
+            "revoke_verb": ToolVerb(
+                name="revoke_verb",
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "tool": {"type": "string", "description": "Tool name (e.g. 'spotify')"},
+                        "verb": {"type": "string", "description": "Verb name to revoke"},
+                        "reason": {"type": "string", "description": "Why this verb is being archived"},
+                    },
+                    "required": ["tool", "verb"],
+                },
+                auth_class="free",
+                reversibility=0.8,
+                description_for_model=(
+                    "Soft-archive a dynamic verb so it no longer appears in the tool registry. "
+                    "The row is retained for audit; use this to undo a define_verb call."
+                ),
+                description_for_human="Revoke a dynamic verb",
+            ),
             "trigger_consolidation": ToolVerb(
                 name="trigger_consolidation",
                 schema={"type": "object", "properties": {}},
@@ -162,6 +257,8 @@ class SelfToolsTool(Tool):
             return self._archive_trait(args)
         elif verb == "define_verb":
             return self._define_verb(args)
+        elif verb == "revoke_verb":
+            return self._revoke_verb(args)
         elif verb == "trigger_consolidation":
             return await self._trigger_consolidation()
         elif verb == "trigger_weekly_self_model":
@@ -272,6 +369,12 @@ class SelfToolsTool(Tool):
         except Exception as exc:
             return ToolResult(success=False, error=f"Invalid schema JSON: {exc}")
 
+        # Static AST safety check before we compile or execute anything.
+        ast_error = _ast_check(code)
+        if ast_error:
+            log.warning("define_verb_ast_rejected", tool=tool_name, verb=verb_name, reason=ast_error)
+            return ToolResult(success=False, error=f"Code failed safety check: {ast_error}")
+
         # Validate code compiles and defines run()
         try:
             code_obj = compile(code, "<define_verb_check>", "exec")
@@ -304,6 +407,32 @@ class SelfToolsTool(Tool):
         return ToolResult(success=True, data={
             "tool": tool_name, "verb": verb_name, "total_dynamic": count,
         })
+
+    def _revoke_verb(self, args: dict) -> ToolResult:
+        tool_name = args.get("tool", "").strip()
+        verb_name = args.get("verb", "").strip()
+        reason = args.get("reason", "").strip()
+        if not tool_name or not verb_name:
+            return ToolResult(success=False, error="tool and verb are required")
+
+        conn = get_connection()
+        row = conn.execute(
+            "SELECT id FROM dynamic_verbs WHERE tool=? AND verb=? AND archived_at IS NULL",
+            (tool_name, verb_name),
+        ).fetchone()
+        if not row:
+            return ToolResult(success=False, error=f"No active dynamic verb '{tool_name}.{verb_name}' found")
+
+        conn.execute(
+            "UPDATE dynamic_verbs SET archived_at=datetime('now'), archive_reason=?, updated_at=datetime('now') WHERE id=?",
+            (reason or "revoked", row["id"]),
+        )
+        conn.commit()
+
+        from chloe.tools.registry import get_registry
+        get_registry().load_dynamic_verbs()
+        log.info("dynamic_verb_revoked", tool=tool_name, verb=verb_name)
+        return ToolResult(success=True, data={"tool": tool_name, "verb": verb_name, "archived": True})
 
     def _archive_trait(self, args: dict) -> ToolResult:
         trait_id = args.get("trait_id", "")

@@ -9,6 +9,7 @@ MIGRATIONS_DIR = Path(__file__).parents[2] / "chloe/state/migrations"
 
 @pytest.fixture(autouse=True)
 def db(tmp_path):
+    close()  # Reset any connection left open by a previous test
     migrate(db_path=tmp_path / "test.db", migrations_dir=MIGRATIONS_DIR)
     yield get_connection()
     close()

@@ -38,6 +38,36 @@ def _due() -> bool:
     return (_now() - last_dt) >= timedelta(hours=WINDOW_HOURS)
 
 
+def _has_new_signal(since: str) -> bool:
+    """Return True if there is enough new activity to justify a Flash call.
+
+    Criteria (any one is sufficient):
+    - ≥3 new memories since the last reflect
+    - ≥2 affect records with intensity ≥0.4
+    - any autonomous action recorded since then
+    """
+    conn = get_connection()
+    mem_count = conn.execute(
+        "SELECT COUNT(*) FROM memories WHERE created_at > ? AND source != 'action'",
+        (since,),
+    ).fetchone()[0]
+    if mem_count >= 3:
+        return True
+
+    affect_count = conn.execute(
+        "SELECT COUNT(*) FROM affect_records WHERE created_at > ? AND intensity >= 0.4",
+        (since,),
+    ).fetchone()[0]
+    if affect_count >= 2:
+        return True
+
+    action_count = conn.execute(
+        "SELECT COUNT(*) FROM memories WHERE created_at > ? AND source='action'",
+        (since,),
+    ).fetchone()[0]
+    return action_count > 0
+
+
 def _load_recent_chat(conn, n: int) -> str:
     # Chat is persisted into `memories` (source='chat') by mobile_ws._persist_chat_turn.
     # Each row's text is prefixed with "Teo said:" or "I said:" — strip that to recover role.
@@ -108,6 +138,21 @@ def _load_interests(conn) -> str:
     return "\n".join(f"- {r['label']} ({r['intensity']:.2f})" for r in rows) or "(none)"
 
 
+def _load_world_beliefs(conn) -> str:
+    rows = conn.execute(
+        """SELECT topic, belief, confidence, noticing
+           FROM world_beliefs ORDER BY confidence DESC LIMIT 10"""
+    ).fetchall()
+    if not rows:
+        return "(none yet)"
+    lines = []
+    for r in rows:
+        conf = float(r["confidence"] or 0.0)
+        prefix = "noticing" if r["noticing"] else ("thinking" if conf < 0.5 else "believe")
+        lines.append(f"- [{prefix}] {r['topic']}: {r['belief']}")
+    return "\n".join(lines)
+
+
 def _load_recent_outcomes(conn) -> str:
     """Return recent autonomous actions and what came back, as readable lines."""
     cutoff = (_now() - timedelta(hours=WINDOW_HOURS)).isoformat()
@@ -122,14 +167,14 @@ def _load_recent_outcomes(conn) -> str:
     return "\n".join(f"- {r['text']}" for r in reversed(rows))
 
 
-def _apply_output(output: ReflectOutput) -> dict:
+async def _apply_output(output: ReflectOutput) -> dict:
     """Persist reflect output into inner state tables. Returns counts."""
     from chloe.inner.pressure import add_want, add_tension
     from chloe.identity.interest_garden import add_interest, boost_interest
     from chloe.identity.goals import update_progress, add_goal
     from chloe.memory.store import add as memory_add
 
-    counts = {"wants": 0, "tensions": 0, "interests": 0, "goals": 0, "goal_updates": 0, "world_beliefs": 0}
+    counts = {"wants": 0, "tensions": 0, "interests": 0, "goals": 0, "goal_updates": 0, "world_beliefs": 0, "trait_evidence": 0}
 
     for w in output.new_wants:
         try:
@@ -177,20 +222,29 @@ def _apply_output(output: ReflectOutput) -> dict:
 
     for wb in (output.new_world_beliefs or []):
         try:
-            conn = get_connection()
-            conn.execute(
-                """INSERT INTO world_beliefs (topic, belief, confidence, source)
-                   VALUES (?, ?, ?, 'reflect')
-                   ON CONFLICT(topic) DO UPDATE SET
-                       belief=excluded.belief,
-                       confidence=MAX(confidence, excluded.confidence),
-                       updated_at=datetime('now')""",
-                (wb.topic.strip()[:80], wb.belief.strip(), wb.confidence),
+            from chloe.inner.belief_revision import store_new_belief
+            await store_new_belief(
+                topic=wb.topic.strip()[:80],
+                belief=wb.belief.strip(),
+                proposed_confidence=wb.confidence,
+                noticing=bool(getattr(wb, "noticing", False)),
             )
-            conn.commit()
             counts["world_beliefs"] += 1
         except Exception as exc:
             log.warning("apply_world_belief_failed", error=str(exc))
+
+    for te in (output.trait_evidence or []):
+        try:
+            from chloe.identity.trait_model import record_trait_evidence
+            record_trait_evidence(
+                behavior_observed=te.behavior_observed,
+                trait_implied=te.trait_implied,
+                reinforces=te.reinforces,
+                contradicts=te.contradicts,
+            )
+            counts["trait_evidence"] += 1
+        except Exception as exc:
+            log.warning("apply_trait_evidence_failed", error=str(exc))
 
     if output.continuity_note:
         try:
@@ -219,6 +273,16 @@ async def run_reflect(force: bool = False) -> dict | None:
     if not force and not _due():
         return None
 
+    # Skip the Flash call when nothing noteworthy happened since last reflect.
+    # Force=True (post-chat reflect) bypasses this check — the caller already
+    # knows there was a conversation.
+    if not force:
+        last_ts = kv_get(LAST_REFLECT_KEY) or "1970-01-01T00:00:00+00:00"
+        if not _has_new_signal(last_ts):
+            log.info("reflect_skipped_no_signal", last=last_ts)
+            kv_set(LAST_REFLECT_KEY, _now().isoformat())  # advance timer
+            return {"applied": {}, "skipped": "no_signal"}
+
     conn = get_connection()
     inner = _load_inner_state(conn)
     payload = {
@@ -232,8 +296,35 @@ async def run_reflect(force: bool = False) -> dict | None:
     }
 
     payload["recent_outcomes"] = _load_recent_outcomes(conn)
+    payload["world_beliefs"] = _load_world_beliefs(conn)
 
     log.info("reflect_start")
+
+    # --- Pass 1: Router — is there anything worth reflecting on? ---
+    # Force=True (post-chat) skips the router since we know there was a conversation.
+    if not force:
+        try:
+            from chloe.llm.schemas import ReflectRouterOutput
+            router_payload = {
+                "recent_chat": payload["recent_chat"],
+                "affect_summary": payload["affect_summary"],
+                "recent_outcomes": payload["recent_outcomes"],
+            }
+            router_result = await _gemini.flash("reflect_router.md", router_payload, ReflectRouterOutput)
+            if router_result:
+                noteworthy = (
+                    router_result.get("noteworthy") if isinstance(router_result, dict)
+                    else getattr(router_result, "noteworthy", True)
+                )
+                if not noteworthy:
+                    log.info("reflect_router_skipped", summary=str(router_result.get("summary", "") if isinstance(router_result, dict) else ""))
+                    kv_set(LAST_REFLECT_KEY, _now().isoformat())
+                    return {"applied": {}, "skipped": "router_nothing_noteworthy"}
+        except Exception as exc:
+            log.warning("reflect_router_error", error=str(exc))
+            # Fall through to the full reflect on router failure
+
+    # --- Pass 2: Full specialist reflect ---
     try:
         result = await _gemini.flash("reflect_combined.md", payload, ReflectOutput)
     except Exception as exc:
@@ -245,7 +336,7 @@ async def run_reflect(force: bool = False) -> dict | None:
         return None
 
     output = ReflectOutput(**result) if isinstance(result, dict) else result
-    counts = _apply_output(output)
+    counts = await _apply_output(output)
     kv_set(LAST_REFLECT_KEY, _now().isoformat())
     log.info("reflect_complete", **counts, note=output.continuity_note[:80])
     return {"applied": counts, "continuity_note": output.continuity_note}

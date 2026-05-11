@@ -149,17 +149,25 @@ def _budget_near_cap() -> bool:
     return _throttle_level() > 0.75
 
 
+_OUTREACH_TOOLS = {"messages", "gmail", "whatsapp"}
+
+
 def _recent_outreach_spike() -> bool:
-    """True if more than 2 kinetic actions in the last 60 minutes."""
+    """True if more than 2 outreach actions in the last 60 minutes.
+
+    Only counts external-communication tools (messages, gmail, whatsapp).
+    Internal actions like notes writes are excluded — they are not outreach.
+    """
     cutoff = datetime.utcnow() - timedelta(hours=1)
     recent = _audit_recent(n=50)
-    kinetic_recent = [
+    outreach_recent = [
         a for a in recent
-        if getattr(a, "authorization", "") in ("kinetic", "kinetic-sensitive")
+        if getattr(a, "tool", "") in _OUTREACH_TOOLS
+        and getattr(a, "authorization", "") in ("kinetic", "kinetic-sensitive")
         and getattr(a, "proposed_at", None)
         and getattr(a, "proposed_at") > cutoff.isoformat()
     ]
-    return len(kinetic_recent) > 2
+    return len(outreach_recent) > 2
 
 
 def _high_cost_estimate(action) -> bool:

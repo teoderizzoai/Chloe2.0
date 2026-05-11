@@ -39,12 +39,27 @@ class Memory:
     relevance_note: str = ""
 
 
-def query_fast(rich_q: str, n: int = 12, collection_name: str = "memories_v2") -> list[Memory]:
+def query_fast(
+    rich_q: str,
+    n: int = 12,
+    collection_name: str = "memories_v2",
+    rerank: bool = False,
+    rerank_keep: int = 5,
+    rerank_timeout: float = 0.3,
+) -> list[Memory]:
     """Single Chroma query, no per-kind partitioning. Used on the chat hot path.
 
     `query_mixed` runs one Chroma query per kind (4x embedding cost). For chat
     where we just want the top-N most relevant memories regardless of kind,
     this is ~4x faster.
+
+    Args:
+        rerank: If True, run a Flash reranker with a `rerank_timeout` second
+                deadline after the Chroma pass. Falls back to score order on
+                timeout or error. Adds ~300ms latency but improves precision for
+                high-stakes turns (deliberation, character addendum generation).
+        rerank_keep: How many memories to keep after reranking (default 5).
+        rerank_timeout: Max seconds to wait for the LLM reranker (default 0.3).
     """
     if not rich_q or not rich_q.strip():
         return []
@@ -85,7 +100,94 @@ def query_fast(rich_q: str, n: int = 12, collection_name: str = "memories_v2") -
         _apply_anchor_bonus(results)
         _apply_inside_joke_bonus(results, rich_q)
     results.sort(key=lambda m: m.score, reverse=True)
+
+    if rerank and results:
+        results = _rerank_with_llm(rich_q, results, keep=rerank_keep, timeout=rerank_timeout)
+
     return results
+
+
+def _rerank_with_llm(
+    query: str,
+    candidates: list[Memory],
+    keep: int = 5,
+    timeout: float = 0.3,
+) -> list[Memory]:
+    """Run a Flash reranker. Falls back to score order on timeout/error.
+
+    This is synchronous but wraps an async Flash call via run_until_complete;
+    it is designed for contexts that are already in a sync frame (chat_api helpers
+    called from build_dynamic_suffix). Deliberation paths that are already async
+    should call the async version directly.
+    """
+    import asyncio
+    try:
+        loop = asyncio.get_running_loop()
+        # We're inside an async context — can't run_until_complete.
+        # Schedule a task and fall back to score order for this request.
+        loop.create_task(_rerank_async(query, candidates, keep))
+        return candidates[:keep]
+    except RuntimeError:
+        pass  # no running loop — use run_until_complete
+
+    try:
+        new_loop = asyncio.new_event_loop()
+        try:
+            reranked = new_loop.run_until_complete(
+                asyncio.wait_for(_rerank_async(query, candidates, keep), timeout=timeout)
+            )
+            return reranked
+        finally:
+            new_loop.close()
+    except Exception as exc:
+        log.debug("reranker_fallback", error=str(exc))
+        return candidates[:keep]
+
+
+async def _rerank_async(query: str, candidates: list[Memory], keep: int) -> list[Memory]:
+    """The actual async Flash rerank call."""
+    from chloe.llm.gemini import GeminiClient
+    from chloe.llm.schemas import GradeResult
+
+    candidate_lines = "\n".join(
+        f"id={m.id} | [{m.kind}] {m.text[:200]}" for m in candidates
+    )
+    client = GeminiClient()
+    result = await client.flash(
+        "grade_memories.md",
+        {
+            "message": query,
+            "history": "",
+            "affect_label": "",
+            "candidates_text": candidate_lines,
+            "keep": keep,
+        },
+        GradeResult,
+    )
+    if not result:
+        return candidates[:keep]
+
+    selected_ids_ordered: list[int] = []
+    items = result.get("selected") if isinstance(result, dict) else getattr(result, "selected", [])
+    for item in items or []:
+        raw_id = item.get("id") if isinstance(item, dict) else getattr(item, "id", None)
+        try:
+            selected_ids_ordered.append(int(raw_id))
+        except (TypeError, ValueError):
+            pass
+
+    if not selected_ids_ordered:
+        return candidates[:keep]
+
+    id_to_mem = {m.id: m for m in candidates}
+    reranked = [id_to_mem[i] for i in selected_ids_ordered if i in id_to_mem]
+    # Preserve any selected not returned by LLM at the end
+    seen = set(selected_ids_ordered)
+    for m in candidates:
+        if m.id not in seen and len(reranked) < keep:
+            reranked.append(m)
+    log.debug("memory_reranked", query=query[:60], kept=len(reranked))
+    return reranked[:keep]
 
 
 def query_mixed(

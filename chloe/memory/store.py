@@ -31,15 +31,22 @@ def add(
     confidence: float = 1.0,
     archived_tier: str = "hot",
     collection_name: str = "memories_v2",
+    unprocessed: bool = False,
 ) -> int:
-    """Insert into SQLite and ChromaDB. Returns the new memory id."""
+    """Insert into SQLite and ChromaDB. Returns the new memory id.
+
+    When `unprocessed=True`, the memory is marked as a not-yet-made-sense-of
+    experience: it surfaces in chat context with phrasing like "haven't fully
+    worked this out yet" and is excluded from belief / trait formation. The
+    weekly review pass decides whether to promote or keep it unprocessed.
+    """
     conn = get_connection()
     cursor = conn.execute(
         """
         INSERT INTO memories
           (kind, text, source, source_ref, tags, artifact_refs, weight, salience, confidence,
-           archived_tier, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           archived_tier, unprocessed, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             kind,
@@ -52,6 +59,7 @@ def add(
             salience,
             confidence,
             archived_tier,
+            1 if unprocessed else 0,
             datetime.now(timezone.utc).isoformat(),
             datetime.now(timezone.utc).isoformat(),
         ),
@@ -68,6 +76,25 @@ def add(
         collection_name=collection_name,
     )
     return memory_id
+
+
+def mark_unprocessed(memory_id: int, value: bool = True) -> None:
+    """Toggle the unprocessed flag on an existing memory."""
+    conn = get_connection()
+    conn.execute(
+        "UPDATE memories SET unprocessed = ? WHERE id = ?",
+        (1 if value else 0, memory_id),
+    )
+    conn.commit()
+
+
+def consider_unprocessed(salience: float, ambiguity: float) -> bool:
+    """Decide whether a memory should be filed as unprocessed.
+
+    Rule (per Chloe 3.0 Block 1, Step 3): ambiguity > 0.6 AND salience > 0.4.
+    Centralized so any extraction pipeline can apply the same threshold.
+    """
+    return ambiguity > 0.6 and salience > 0.4
 
 
 async def grade(

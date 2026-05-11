@@ -217,4 +217,13 @@ def _apply_optional_outputs(output: SelfModelOutput) -> None:
             "written_at": datetime.now(timezone.utc).isoformat(),
         })
         kv_set("voice_drift_notes", existing[-3:])
+        # Also persist to voice_drift_log table so chat_api can surface it.
+        try:
+            conn.execute(
+                "INSERT INTO voice_drift_log (note) VALUES (?)",
+                (output.voice_drift_note.strip()[:600],),
+            )
+            conn.commit()
+        except Exception as exc:
+            log.warning("voice_drift_log_write_failed", error=str(exc))
         log.info("voice_drift_note_written", note=output.voice_drift_note)

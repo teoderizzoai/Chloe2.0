@@ -129,6 +129,195 @@ def _write_revision_memory(old_content: str, new_content: str, note: str) -> Non
         pass
 
 
+# ---------------------------------------------------------------------------
+# World beliefs (Block 1/3) — confidence floor + consistency check + tensions
+# ---------------------------------------------------------------------------
+
+WORLD_BELIEF_FLOOR = 0.2
+LOOSELY_HELD_THRESHOLD = 0.5
+CONFIRMATION_BUMP = 0.08
+
+
+async def store_new_belief(
+    topic: str,
+    belief: str,
+    proposed_confidence: float = 0.5,
+    noticing: bool = False,
+) -> int | None:
+    """Persist a new world belief with the developmental floor + consistency check.
+
+    On first storage, confidence is clamped to WORLD_BELIEF_FLOOR (0.2). Confidence
+    rises only via repeated confirmation across reflect windows — each repeat call
+    on the same topic bumps confidence by CONFIRMATION_BUMP.
+
+    Before persisting, runs a Flash consistency call against existing beliefs.
+    If a tension surfaces, the new belief is stored anyway, points at the
+    conflicting belief via `contradicts`, and an inner_tension is opened so
+    Chloe can sit with the contradiction rather than auto-overwrite.
+    """
+    conn = get_connection()
+    topic = topic.strip()[:80]
+    belief = belief.strip()
+    if not topic or not belief:
+        return None
+
+    existing_same = conn.execute(
+        "SELECT id, confidence, confirmation_count FROM world_beliefs WHERE topic=?", (topic,)
+    ).fetchone()
+
+    # Async LLM consistency check against all existing beliefs except the same topic.
+    contradicts_id: int | None = None
+    try:
+        contradicts_id = await _check_consistency_async(topic, belief)
+    except Exception as exc:
+        log.warning("belief_consistency_check_failed", error=str(exc))
+
+    if existing_same:
+        new_count = (existing_same["confirmation_count"] or 1) + 1
+        # Confirmation lifts confidence by a small step, bounded below by floor.
+        new_conf = min(0.95, max(WORLD_BELIEF_FLOOR, existing_same["confidence"] + CONFIRMATION_BUMP))
+        held_loosely = new_conf < LOOSELY_HELD_THRESHOLD
+        conn.execute(
+            """UPDATE world_beliefs
+               SET belief=?, confidence=?, held_loosely=?, noticing=?,
+                   confirmation_count=?, contradicts=COALESCE(?, contradicts),
+                   updated_at=datetime('now')
+               WHERE id=?""",
+            (belief, new_conf, 1 if held_loosely else 0, 1 if noticing else 0,
+             new_count, contradicts_id, existing_same["id"]),
+        )
+        conn.commit()
+        log.info("belief_confirmed", id=existing_same["id"], topic=topic,
+                 confidence=round(new_conf, 2), confirmation=new_count)
+        if contradicts_id:
+            _open_belief_tension(existing_same["id"], contradicts_id, topic)
+        return existing_same["id"]
+
+    # New topic — clamp to confidence floor regardless of LLM proposal.
+    initial_conf = max(WORLD_BELIEF_FLOOR, min(0.5, float(proposed_confidence)))
+    held_loosely = initial_conf < LOOSELY_HELD_THRESHOLD
+    cursor = conn.execute(
+        """INSERT INTO world_beliefs
+             (topic, belief, confidence, source, held_loosely, noticing, contradicts, confirmation_count)
+           VALUES (?, ?, ?, 'reflect', ?, ?, ?, 1)""",
+        (topic, belief, initial_conf, 1 if held_loosely else 0, 1 if noticing else 0, contradicts_id),
+    )
+    new_id = cursor.lastrowid
+    conn.commit()
+    log.info("belief_new", id=new_id, topic=topic, confidence=round(initial_conf, 2),
+             noticing=noticing, contradicts=contradicts_id)
+    if contradicts_id:
+        _open_belief_tension(new_id, contradicts_id, topic)
+    return new_id
+
+
+async def _check_consistency_async(topic: str, belief: str) -> int | None:
+    """Flash call to detect semantic contradictions between the new belief and existing ones.
+
+    The LLM is better than the old lexical heuristic at catching inverses like
+    "people are more honest than they seem" vs "people hide their real feelings."
+    Falls back to the lexical heuristic if no API key is available or the call
+    fails, so the system degrades gracefully in offline / test contexts.
+    """
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT id, topic, belief FROM world_beliefs WHERE topic != ? ORDER BY confidence DESC LIMIT 20",
+        (topic,),
+    ).fetchall()
+    if not rows:
+        return None
+
+    try:
+        from chloe.llm.gemini import GeminiClient
+        from chloe.llm.schemas import BeliefConsistencyResult
+
+        existing_lines = "\n".join(f"- id={r['id']} | {r['topic']}: {r['belief']}" for r in rows)
+        client = GeminiClient()
+        result = await client.flash(
+            "belief_consistency.md",
+            {"new_topic": topic, "new_belief": belief, "existing_beliefs": existing_lines},
+            BeliefConsistencyResult,
+        )
+        if result is None:
+            return _check_consistency_lexical(topic, belief, rows)
+
+        cid = result.get("contradicts_id") if isinstance(result, dict) else getattr(result, "contradicts_id", None)
+        if cid is not None:
+            log.info("belief_llm_tension_detected", new_topic=topic, conflict_with=cid)
+            return int(cid)
+        return None
+    except Exception as exc:
+        log.warning("belief_llm_consistency_failed", error=str(exc))
+        return _check_consistency_lexical(topic, belief, rows)
+
+
+def _check_consistency_lexical(topic: str, belief: str, rows) -> int | None:
+    """Fallback lexical contradiction heuristic (word overlap + negation polarity)."""
+    negators = {"not", "never", "no", "isn't", "doesn't", "won't", "can't"}
+    new_has_neg = any(w in negators for w in belief.lower().split())
+    new_words = set(belief.lower().split())
+    for r in rows:
+        existing_words = set(r["belief"].lower().split())
+        overlap = new_words & existing_words
+        if len(overlap) >= 4:
+            existing_has_neg = any(w in negators for w in r["belief"].lower().split())
+            if new_has_neg != existing_has_neg:
+                log.info("belief_lexical_tension_detected", new_topic=topic, conflict_with=r["id"])
+                return int(r["id"])
+    return None
+
+
+def _check_consistency_sync(topic: str, belief: str) -> int | None:
+    """Synchronous wrapper — tries to run the async LLM check in the running loop,
+    falls back to the lexical heuristic when no loop is available.
+    """
+    try:
+        import asyncio
+        loop = asyncio.get_running_loop()
+        # Schedule as a task so we don't block the event loop; result is discarded
+        # here (async path in store_new_belief should call _check_consistency_async
+        # directly). This sync wrapper exists only for backwards compatibility.
+        loop.create_task(_check_consistency_async_and_log(topic, belief))
+        # Return None now — the tension will be opened asynchronously if found.
+        return None
+    except RuntimeError:
+        # No running loop — use the lexical fallback synchronously.
+        conn = get_connection()
+        rows = conn.execute(
+            "SELECT id, topic, belief FROM world_beliefs WHERE topic != ? ORDER BY confidence DESC LIMIT 20",
+            (topic,),
+        ).fetchall()
+        return _check_consistency_lexical(topic, belief, rows)
+
+
+async def _check_consistency_async_and_log(topic: str, belief: str) -> None:
+    """Helper used by the sync wrapper — runs the async check and opens a tension if one is found."""
+    try:
+        cid = await _check_consistency_async(topic, belief)
+        if cid:
+            conn = get_connection()
+            existing_same = conn.execute(
+                "SELECT id FROM world_beliefs WHERE topic=?", (topic,)
+            ).fetchone()
+            if existing_same:
+                _open_belief_tension(existing_same["id"], cid, topic)
+    except Exception as exc:
+        log.warning("belief_async_consistency_log_failed", error=str(exc))
+
+
+def _open_belief_tension(new_belief_id: int, conflict_id: int, topic: str) -> None:
+    """Create an inner_tension that reflects the unresolved belief conflict."""
+    from chloe.inner.pressure import add_tension
+    try:
+        add_tension(
+            f"Two views I hold sit in tension around '{topic}'.",
+            tags=["unresolved", "belief_conflict"],
+            pressure=0.55,
+        )
+    except Exception as exc:
+        log.warning("belief_tension_record_failed", error=str(exc))
+
+
 def get_belief_confidence_summary(tags: list[str]) -> dict | None:
     conn = get_connection()
 

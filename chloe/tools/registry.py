@@ -22,11 +22,13 @@ class ToolRegistry:
         log.info("tool_registered", name=tool.name, verbs=list(tool.verbs.keys()))
 
     def load_dynamic_verbs(self) -> int:
-        """Read dynamic_verbs table and cache them. Returns count loaded."""
+        """Read dynamic_verbs table and cache active (non-archived) rows. Returns count loaded."""
         try:
             from chloe.state.db import get_connection
             conn = get_connection()
-            rows = conn.execute("SELECT * FROM dynamic_verbs").fetchall()
+            rows = conn.execute(
+                "SELECT * FROM dynamic_verbs WHERE archived_at IS NULL"
+            ).fetchall()
         except Exception as exc:
             log.warning("dynamic_verbs_load_failed", error=str(exc))
             return 0

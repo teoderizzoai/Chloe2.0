@@ -29,7 +29,8 @@ SCRIPTED_EVENTS = [
 @pytest.fixture(autouse=True)
 def no_leash():
     with patch("chloe.actions.gate.leash_mod.violates", return_value=(False, "")):
-        yield
+        with patch("chloe.actions.deliberate.should_deliberate", return_value=False):
+            yield
 
 
 @pytest.fixture(autouse=True)

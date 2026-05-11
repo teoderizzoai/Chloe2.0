@@ -12,6 +12,7 @@ MIGRATIONS_DIR = Path(__file__).parents[2] / "chloe/state/migrations"
 
 @pytest.fixture(autouse=True)
 def fresh_db(tmp_path):
+    close()
     migrate(db_path=tmp_path / "test.db", migrations_dir=MIGRATIONS_DIR)
     yield
     close()
@@ -86,6 +87,7 @@ async def test_kinetic_sensitive_awaits_confirmation():
     conn.commit()
     import unittest.mock as m
     with m.patch("chloe.actions.gate.leash_mod.violates", return_value=(False, "")), \
+         m.patch("chloe.actions.deliberate.should_deliberate", return_value=False), \
          m.patch("chloe.channels.push.get_teo_device_info", return_value={}):
         result = await gate.submit(a)
     assert result.awaiting

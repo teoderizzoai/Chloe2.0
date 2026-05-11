@@ -7,6 +7,7 @@ from chloe.initiative.candidates import (
     interest_driven_candidates, routine_candidates, CandidateAction,
     mark_routine_done,
 )
+from chloe.initiative.share_queue import share_queue_candidates
 from chloe.initiative.curiosity import curiosity_driven_candidates, mark_curiosity_surfaced
 from chloe.initiative.opportunity import get_opportunity_vector
 from chloe.actions.budget import throttle_level
@@ -20,6 +21,24 @@ from chloe.observability.metrics import chloe_initiative_ticks_total
 from chloe.observability import live_buffer
 
 log = get_logger("initiative.engine")
+
+DAILY_WEB_SEARCH_CAP = 3
+_SEARCH_BUDGET_KV_KEY = "initiative:web_search_count:{date}"
+
+
+def _web_search_budget_remaining() -> int:
+    """Return how many interest-driven web searches are still allowed today."""
+    today = datetime.now().date().isoformat()
+    count = kv_get(_SEARCH_BUDGET_KV_KEY.format(date=today)) or 0
+    return max(0, DAILY_WEB_SEARCH_CAP - int(count))
+
+
+def _consume_web_search_budget() -> None:
+    today = datetime.now().date().isoformat()
+    key = _SEARCH_BUDGET_KV_KEY.format(date=today)
+    count = kv_get(key) or 0
+    kv_set(key, int(count) + 1)
+
 
 # INITIATIVE_THRESHOLD calibrated at 0.35 on 2026-06-01 after 14 days of shadow.
 # Shadow stats: idle_rate=0.68, 28% active, ~3 actions/day average.
@@ -54,6 +73,9 @@ def _get_threshold(candidate: "CandidateAction | None" = None) -> float:
 
 async def tick() -> object | None:
     """Run one initiative tick. Returns gate ActionResult or None if idle."""
+    from chloe.identity.interest_garden import drain_pending_curiosity_questions
+    await drain_pending_curiosity_questions()
+
     now = datetime.now()
     threshold = _get_threshold()  # base threshold; per-candidate threshold applied below
 
@@ -64,6 +86,7 @@ async def tick() -> object | None:
         + interest_driven_candidates(inner_state.get("interests"))
         + routine_candidates(now)
         + curiosity_driven_candidates()
+        + share_queue_candidates()
     )
 
     affect = _load_affect()
@@ -134,6 +157,14 @@ async def tick() -> object | None:
             return None
         action.args["body"] = body
 
+    # Budget gate: interest-driven web searches capped at 3/day.
+    if best.tool == "web_search" and best.source == "interest":
+        if _web_search_budget_remaining() <= 0:
+            log.info("tick_web_search_budget_exhausted", date=datetime.now().date().isoformat())
+            chloe_initiative_ticks_total.labels(outcome="idle").inc()
+            return None
+        _consume_web_search_budget()
+
     result = None
     try:
         result = await gate_submit(action)
@@ -154,6 +185,12 @@ async def tick() -> object | None:
         elif best.source == "curiosity":
             topic = best.source_id.removeprefix("curiosity:")
             mark_curiosity_surfaced(topic)
+        elif best.source == "share_queue":
+            try:
+                from chloe.initiative.share_queue import mark_shared
+                mark_shared(int(best.source_id))
+            except Exception:
+                pass
 
     return result
 

@@ -152,29 +152,38 @@ def _fetch_gaps() -> list[dict]:
         return []
 
 
-CONTRADICTION_PAIRS = [
-    (["late", "tired", "exhausted"], ["energetic", "motivated", "excited"]),
-    (["avoid", "don't want", "not interested"], ["excited about", "looking forward"]),
-    (["sick", "ill", "unwell"], ["working", "gym", "running"]),
-]
-
-
 def _detect_tensions(intent: str, memories: list[Memory], beliefs: list[dict]) -> list[str]:
-    tensions = []
+    """Surface real tensions from the inner_tensions table and world_beliefs.contradicts.
 
-    intent_lower = intent.lower()
-    belief_texts = " ".join(b.get("text", "") for b in beliefs).lower()
-    memory_texts = " ".join(getattr(m, "text", "") for m in memories[:5]).lower()
-    recent_context = belief_texts + " " + memory_texts
+    The previous implementation used hardcoded word-pair lists and substring matching,
+    which produced false positives and missed semantic oppositions. Now we read from
+    the sources that actually track contradictions:
 
-    for pos_words, neg_words in CONTRADICTION_PAIRS:
-        if any(w in intent_lower for w in pos_words) and any(w in recent_context for w in neg_words):
-            tensions.append(
-                f"Possible tension: intent suggests {pos_words[0]!r} but recent context suggests {neg_words[0]!r}."
-            )
-        if any(w in intent_lower for w in neg_words) and any(w in recent_context for w in pos_words):
-            tensions.append(
-                f"Possible tension: intent suggests {neg_words[0]!r} but recent context suggests {pos_words[0]!r}."
-            )
+    - inner_tensions: pressure-scored unresolved tensions already known
+    - world_beliefs.contradicts: belief pairs flagged by the consistency check
+    """
+    tensions: list[str] = []
+    conn = get_connection()
+
+    # 1. Active inner tensions (highest pressure first)
+    rows = conn.execute(
+        "SELECT text, pressure FROM inner_tensions WHERE resolved=0 ORDER BY pressure DESC LIMIT 3"
+    ).fetchall()
+    for r in rows:
+        tensions.append(f"Active tension (p={r['pressure']:.2f}): {r['text']}")
+
+    # 2. Belief pairs that contradict each other
+    conflict_rows = conn.execute(
+        """SELECT wb1.topic, wb1.belief, wb2.belief AS conflicting_belief
+           FROM world_beliefs wb1
+           JOIN world_beliefs wb2 ON wb1.contradicts = wb2.id
+           WHERE wb1.contradicts IS NOT NULL
+           LIMIT 2"""
+    ).fetchall()
+    for r in conflict_rows:
+        tensions.append(
+            f"Belief tension on '{r['topic']}': "
+            f"'{r['belief'][:80]}' vs '{r['conflicting_belief'][:80]}'"
+        )
 
     return tensions[:3]

@@ -46,7 +46,7 @@ def test_budget_under_threshold(monkeypatch):
 def test_recent_outreach_spike(monkeypatch):
     now = datetime.utcnow()
     fake_actions = [
-        _make_action(authorization="kinetic")
+        _make_action(tool="messages", verb="send_text", authorization="kinetic")
         for _ in range(3)
     ]
     for a in fake_actions:
@@ -56,9 +56,23 @@ def test_recent_outreach_spike(monkeypatch):
     assert _recent_outreach_spike() is True
 
 
+def test_no_outreach_spike_non_outreach_tool(monkeypatch):
+    """Non-outreach tools (spotify, notes) do not count toward the spike."""
+    now = datetime.utcnow()
+    fake_actions = [
+        _make_action(tool="spotify", verb="queue_track", authorization="kinetic")
+        for _ in range(3)
+    ]
+    for a in fake_actions:
+        a.proposed_at = (now - timedelta(minutes=10)).isoformat()
+
+    monkeypatch.setattr("chloe.actions.deliberate._audit_recent", lambda n: fake_actions)
+    assert _recent_outreach_spike() is False
+
+
 def test_no_outreach_spike(monkeypatch):
     now = datetime.utcnow()
-    fake_actions = [_make_action(authorization="kinetic")]
+    fake_actions = [_make_action(tool="messages", verb="send_text", authorization="kinetic")]
     fake_actions[0].proposed_at = (now - timedelta(minutes=10)).isoformat()
 
     monkeypatch.setattr("chloe.actions.deliberate._audit_recent", lambda n: fake_actions)

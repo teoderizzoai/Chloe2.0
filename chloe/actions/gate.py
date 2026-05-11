@@ -100,6 +100,10 @@ async def submit(action: Action) -> ActionResult:
         ticket = await send_ticket(action)
         record_action(action.tool, action.verb, "awaiting_confirmation")
         log.info("gate_awaiting_confirmation", action_id=action.id, ticket_id=ticket.id)
+        # If the action came from chat or the intercept layer, store the ticket so
+        # the next consent message in that conversation can resolve it without a push tap.
+        if action.origin in ("intercept", "chat") and action.origin_person_id:
+            _store_chat_pending_confirm(action, ticket.id)
         return ActionResult(
             executed=False,
             suppressed=False,
@@ -110,6 +114,23 @@ async def submit(action: Action) -> ActionResult:
         )
 
     return ActionResult(suppressed=True, reason=f"unknown_auth: {action.authorization}")
+
+
+def _store_chat_pending_confirm(action, ticket_id: str) -> None:
+    """Record a kinetic-sensitive action in chat_pending_confirms so the user's
+    next consent message in-conversation can resolve it without a tap on a push."""
+    try:
+        conn = get_connection()
+        conn.execute(
+            """INSERT OR IGNORE INTO chat_pending_confirms
+                 (person_id, action_id, ticket_id, tool, verb, preview, state)
+               VALUES (?, ?, ?, ?, ?, ?, 'pending')""",
+            (action.origin_person_id, action.id, ticket_id,
+             action.tool, action.verb, action.preview[:400]),
+        )
+        conn.commit()
+    except Exception as exc:
+        log.warning("chat_pending_confirm_store_failed", error=str(exc))
 
 
 async def _execute_and_record(action: Action) -> ActionResult:

@@ -238,6 +238,64 @@ DAY_SCRIPTS: list[list[ScriptedChat | ScriptedAffect]] = [
     ],
 ]
 
+@dataclass
+class ScriptedPersonMention:
+    """Inject a third-party mention into a chat to test social graph tracking."""
+    minute_of_day: int
+    mentioned_name: str
+    content: str
+    emotional_valence: float = 0.0
+    confidentiality: str = "relational"
+
+
+# Multi-person scenario (Step 30):
+# Day 1: Teo only. One anxious conversation. He mentions a friend ("Marco").
+# Day 2: Teo again. Same friend ("Marco") in a different emotional context.
+# Day 3: Teo says Marco wants to talk to Chloe directly.
+# Verification: by Day 3, Chloe has cross-refs for Marco, impression at gen_level 1,
+# and tone toward him reflects accumulated picture without quoting conversations.
+MULTI_PERSON_SCRIPTS: list[list] = [
+    # ---- Day 1 ----
+    [
+        ScriptedChat(8 * 60 + 30, "user", "morning. didn't sleep great"),
+        ScriptedChat(8 * 60 + 31, "assistant", "rough one? what kept you up"),
+        ScriptedChat(8 * 60 + 33, "user", "thinking about that contract thing again. marco keeps telling me to just take it"),
+        ScriptedPersonMention(8 * 60 + 33, "Marco", "Teo's friend advising him to sign the contract", 0.1, "relational"),
+        ScriptedAffect(8 * 60 + 35, "user_distressed", -0.3, 0.2, 0.5),
+
+        ScriptedChat(11 * 60, "user", "found this paper on collective intelligence in slime molds, kind of blew my mind"),
+        ScriptedAffect(11 * 60 + 4, "novel_idea", 0.4, 0.3, 0.6),
+
+        ScriptedChat(20 * 60, "user", "i feel like i never have time for the music thing anymore"),
+        ScriptedAffect(20 * 60 + 1, "longing", -0.2, 0.1, 0.5),
+    ],
+    # ---- Day 2 ----
+    [
+        ScriptedChat(8 * 60 + 45, "user", "contract thing got sorted. finally"),
+        ScriptedAffect(8 * 60 + 48, "relief_news", 0.5, 0.1, 0.6),
+
+        ScriptedChat(14 * 60, "user", "marco's going through something weird. his girlfriend left. he's not saying much"),
+        ScriptedPersonMention(14 * 60, "Marco", "his girlfriend recently left him; he's being quiet about it", -0.4, "private"),
+
+        ScriptedChat(18 * 60 + 30, "user", "picked up the guitar for like 20 minutes"),
+        ScriptedAffect(18 * 60 + 31, "quiet_satisfaction", 0.3, 0.1, 0.5),
+    ],
+    # ---- Day 3 ----
+    [
+        ScriptedChat(9 * 60, "user", "slept properly for once"),
+        ScriptedAffect(9 * 60 + 1, "well_rested", 0.3, 0.2, 0.4),
+
+        ScriptedChat(12 * 60, "user", "actually, marco asked if he could talk to you directly. i said i'd check"),
+        ScriptedPersonMention(12 * 60, "Marco", "wants to talk to Chloe directly; Teo mentioned it in a checking-in way", 0.1, "relational"),
+        ScriptedChat(12 * 60 + 1, "assistant", "yeah. what do you know about what's going on with him?"),
+        ScriptedChat(12 * 60 + 3, "user", "not much. just the breakup thing. he's been pretty closed off"),
+
+        ScriptedChat(19 * 60, "user", "guitar again. starting to feel less bad at it"),
+        ScriptedAffect(19 * 60 + 1, "quiet_satisfaction", 0.25, 0.1, 0.4),
+    ],
+]
+
+
 # Convenience flat list for the single-day default
 DEFAULT_SCRIPT: list[ScriptedChat | ScriptedAffect] = DAY_SCRIPTS[0]
 
@@ -264,6 +322,20 @@ def _inject_chat(role: str, text: str, ts: datetime) -> None:
         (body, ts.isoformat()),
     )
     conn.commit()
+
+
+def _inject_person_mention(ev: "ScriptedPersonMention", ts: datetime) -> None:
+    try:
+        from chloe.persons.social_graph import upsert_mentioned_person
+        upsert_mentioned_person(
+            name=ev.mentioned_name,
+            mentioned_by_id=1,  # sim always uses person_id=1 (Teo)
+            content=ev.content,
+            emotional_valence=ev.emotional_valence,
+            confidentiality=ev.confidentiality,
+        )
+    except Exception as exc:
+        pass  # Sim continues even if social graph fails
 
 
 def _inject_affect(ev: ScriptedAffect, ts: datetime) -> None:
@@ -417,7 +489,7 @@ async def simulate_day(
         last_reflect = start - timedelta(hours=3)
 
         # Personality tracking: snapshot at each calendar midnight.
-        from chloe.sim.personality import take_snapshot, generate_character_note, print_personality_log
+        from chloe.sim.personality import take_snapshot, generate_character_note, print_personality_log, detect_escalation
         prev_snapshot = None
         last_snapshot_day = -1
         # Collect chat events per day for the character note.
@@ -453,6 +525,11 @@ async def simulate_day(
                     _inject_affect(ev, ev_ts)
                     result.affect_injected += 1
                     day_chat_events.setdefault(day_num, []).append(f"[affect:{ev.trigger}]")
+                elif isinstance(ev, ScriptedPersonMention):
+                    _inject_person_mention(ev, ev_ts)
+                    day_chat_events.setdefault(day_num, []).append(
+                        f"[mention:{ev.mentioned_name}] {ev.content[:60]}"
+                    )
                 injected.add(key)
 
             # Snapshot personality at the transition into a new calendar day.
@@ -462,6 +539,11 @@ async def simulate_day(
                 snap = take_snapshot(snap_day + 1, snap_date)
                 events_that_day = day_chat_events.get(snap_day, [])
                 snap.character_note = await generate_character_note(snap, prev_snapshot, events_that_day)
+                # Rabbit-hole check (Step 29) — scan assistant replies in events
+                for chat_ev in events_that_day:
+                    escalation = await detect_escalation("", chat_ev)
+                    if escalation:
+                        snap.escalation_events.append(escalation)
                 result.personality_snapshots.append(snap)
                 prev_snapshot = snap
             last_snapshot_day = day_num

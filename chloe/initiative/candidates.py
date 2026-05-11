@@ -225,7 +225,13 @@ INTEREST_TOOL_MAP = {
 
 
 def interest_driven_candidates(garden: list | None = None) -> list[CandidateAction]:
-    """Build candidate actions from interests with intensity ≥ 0.3 (top 3)."""
+    """Build candidate actions from interests with intensity ≥ 0.3 (top 3).
+
+    Curiosity-thread opening (anything beyond noting in a private file) requires
+    gen_level >= 2 — the interest must have developed past a single instance or
+    a loose pattern into a recognizable interest area. Pre-gen_level-2 interests
+    still get private capture (notes), but no outbound searches or shares.
+    """
     if garden is None:
         garden = _load_interests()
 
@@ -238,12 +244,21 @@ def interest_driven_candidates(garden: list | None = None) -> list[CandidateActi
         pressure = min(0.9, intensity * 0.85)
         category, why = _parse_interest_category(interest)
         label = interest.get("label", "this topic")
+        gen_level = int(interest.get("gen_level") or 0)
 
         preferred_tool = INTEREST_TOOL_MAP.get(category, "web_search")
 
+        # Gate: outbound curiosity threads (web_search, spotify discovery)
+        # only fire once the interest has earned gen_level >= 2. Below that,
+        # she has experienced it but not yet generalized it — keep it private.
+        if gen_level < 2 and preferred_tool in ("web_search", "spotify"):
+            preferred_tool = "notes"
+
         if preferred_tool == "web_search":
             tool, verb = "web_search", "search"
-            args = {"query": _interest_search_query(label, why)}
+            cached_q = kv_get(f"interest:curiosity_question:{interest.get('id', '')}")
+            query = str(cached_q) if cached_q else _interest_search_query(label, why)
+            args = {"query": query}
         elif preferred_tool == "spotify":
             tool, verb = "spotify", "queue_track"
             args = {}
@@ -259,7 +274,12 @@ def interest_driven_candidates(garden: list | None = None) -> list[CandidateActi
             source_id=str(interest.get("id", "")),
         ))
 
-    log.debug("interest_candidates", count=len(candidates), top_labels=[i.get("label") for i in top3])
+    log.debug(
+        "interest_candidates",
+        count=len(candidates),
+        top_labels=[i.get("label") for i in top3],
+        gen_levels=[int(i.get("gen_level") or 0) for i in top3],
+    )
     return candidates
 
 
@@ -267,7 +287,8 @@ def _load_interests() -> list[dict]:
     from chloe.state.db import get_connection
     conn = get_connection()
     rows = conn.execute(
-        "SELECT * FROM interest_garden WHERE intensity > 0.1 ORDER BY intensity DESC LIMIT 10"
+        "SELECT id, label, why, intensity, gen_level, last_engaged_at "
+        "FROM interest_garden WHERE intensity > 0.1 ORDER BY intensity DESC LIMIT 10"
     ).fetchall()
     return [dict(r) for r in rows]
 

@@ -59,19 +59,18 @@ def test_fetch_active_beliefs_excludes_archived(db):
     assert any("active" in b["text"] for b in beliefs)
 
 
-def test_tension_detection_fires_on_contradiction():
-    from dataclasses import dataclass
-
-    @dataclass
-    class FakeMem:
-        text: str = "I was really energetic today"
-
-    tensions = _detect_tensions(
-        intent="I'm tired and exhausted",
-        memories=[FakeMem()],
-        beliefs=[{"text": "motivated and excited about the project", "confidence": 0.8}],
+def test_tension_detection_fires_on_contradiction(db):
+    """_detect_tensions reads from the DB; seed an active tension and verify it surfaces."""
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO inner_tensions (text, pressure, resolved)"
+        " VALUES ('feels pulled between work and rest', 0.8, 0)"
     )
+    conn.commit()
+
+    tensions = _detect_tensions(intent="any", memories=[], beliefs=[])
     assert len(tensions) > 0
+    assert any("work" in t or "rest" in t for t in tensions)
 
 
 def test_tension_detection_no_false_positives():

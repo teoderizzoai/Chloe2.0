@@ -72,6 +72,8 @@ class Action(BaseModel):
     user_response: UserResponse | None = None
     becomes_memory_id: int | None = None
     artifact_refs: list[ArtifactRef] = Field(default_factory=list)
+    origin: str | None = None  # "chat", "intercept", "initiative", etc.
+    origin_person_id: int | None = None  # person the action is associated with
 
     @field_serializer("proposed_at")
     def serialize_proposed_at(self, v: datetime) -> str:

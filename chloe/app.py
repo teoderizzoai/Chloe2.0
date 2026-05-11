@@ -68,6 +68,10 @@ async def lifespan(app: FastAPI):
     applied = migrate()
     log.info("migrations_applied", count=applied)
 
+    from chloe.state.db import seed_primary_persons
+    seed_primary_persons()
+    log.info("primary_persons_seeded")
+
     _sync_memories_to_chroma()
 
     register_all_tools()
