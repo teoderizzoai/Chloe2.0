@@ -40,6 +40,37 @@ class SpotifyTool(Tool):
                 description_for_model="Show Teo's recently played tracks on Spotify.",
                 description_for_human="Show recent listens",
             ),
+            "search": ToolVerb(
+                name="search",
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Free-text query, e.g. 'Traumatized Chri$tian Gate$'"},
+                        "type": {"type": "string", "description": "track | album | playlist | artist", "default": "track"},
+                        "limit": {"type": "integer", "default": 5},
+                    },
+                    "required": ["query"],
+                },
+                auth_class="intimate",
+                reversibility=1.0,
+                description_for_model=(
+                    "Search Spotify's catalog for tracks/albums/playlists/artists by name. "
+                    "Use this to resolve a song name to a 'spotify:track:...' URI before queueing or playing."
+                ),
+                description_for_human="Search Spotify",
+            ),
+            "play_track": ToolVerb(
+                name="play_track",
+                schema={"type": "object", "properties": {"uri": {"type": "string"}}, "required": ["uri"]},
+                auth_class="kinetic",
+                reversibility=0.3,
+                cost_per_call_usd=0.0,
+                description_for_model=(
+                    "Play a single track immediately on Teo's Spotify (interrupts current playback). "
+                    "Takes a 'spotify:track:...' URI. Use this when Teo says 'play X now' — not queue_track."
+                ),
+                description_for_human="Play track now",
+            ),
             "queue_track": ToolVerb(
                 name="queue_track",
                 schema={"type": "object", "properties": {"uri": {"type": "string"}}, "required": ["uri"]},
@@ -108,6 +139,8 @@ class SpotifyTool(Tool):
     def dry_run(self, verb: str, args: dict) -> str:
         if verb == "queue_track":
             return f"Would queue track: {args.get('uri', '?')}"
+        if verb == "play_track":
+            return f"Would play track now: {args.get('uri', '?')}"
         if verb == "build_playlist":
             return f"Would create playlist '{args.get('name', '?')}' with {len(args.get('track_uris', []))} tracks"
         if verb == "start_playlist":
@@ -148,6 +181,44 @@ class SpotifyTool(Tool):
             return resp.json()
 
     async def execute(self, verb: str, args: dict) -> ToolResult:
+        if verb == "search":
+            q = args.get("query", "").strip()
+            if not q:
+                return ToolResult(success=False, error="query is required")
+            stype = args.get("type", "track")
+            limit = min(int(args.get("limit", 5) or 5), 20)
+            data = await self._call("/search", params={"q": q, "type": stype, "limit": limit})
+            if not data:
+                return ToolResult(success=False, error="Spotify search failed")
+            key = stype + "s"
+            items = (data.get(key) or {}).get("items", [])
+            results = []
+            for it in items:
+                results.append({
+                    "uri": it.get("uri"),
+                    "name": it.get("name"),
+                    "artists": ", ".join(a["name"] for a in it.get("artists", [])) if it.get("artists") else None,
+                    "album": (it.get("album") or {}).get("name") if stype == "track" else None,
+                })
+            return ToolResult(success=True, data={"results": results})
+
+        if verb == "play_track":
+            uri = args.get("uri", "")
+            if not uri.startswith("spotify:track:"):
+                return ToolResult(success=False, error="Invalid Spotify track URI")
+            hdrs = await self._get_headers()
+            if not hdrs:
+                return ToolResult(success=False, error="No Spotify token")
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.put(
+                    f"{SPOTIFY_API}/me/player/play",
+                    headers=hdrs,
+                    json={"uris": [uri]},
+                )
+            if resp.status_code in (200, 204):
+                return ToolResult(success=True, data={"playing": uri}, artifact_ref=uri, artifact_kind="spotify_track")
+            return ToolResult(success=False, error=f"Spotify API error: {resp.status_code}: {resp.text[:200]}")
+
         if verb == "show_currently_playing":
             data = await self._call("/me/player/currently-playing")
             if not data or not data.get("item"):

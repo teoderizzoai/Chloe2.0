@@ -50,7 +50,11 @@ class GmailTool(Tool):
                 },
                 auth_class="intimate",
                 reversibility=1.0,
-                description_for_model="Read recent emails from Teo's Gmail inbox.",
+                description_for_model=(
+                    "Read Teo's most recent Gmail messages. Use this for 'latest email', 'what's in my inbox', etc. "
+                    "The optional `label` must be a Gmail system label ID (INBOX, SENT, SPAM, STARRED, UNREAD) — "
+                    "NOT a topic keyword. To find emails about a topic, use gmail.search instead."
+                ),
                 description_for_human="Read recent Gmail",
             ),
             "read_thread": ToolVerb(
@@ -63,10 +67,22 @@ class GmailTool(Tool):
             ),
             "search": ToolVerb(
                 name="search",
-                schema={"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Gmail search query, e.g. 'job OR work OR interview newer_than:7d'"},
+                        "limit": {"type": "integer", "default": 5},
+                    },
+                    "required": ["query"],
+                },
                 auth_class="intimate",
                 reversibility=1.0,
-                description_for_model="Search Teo's Gmail with a query string.",
+                description_for_model=(
+                    "Search Teo's Gmail with a query string and return full message metadata + snippet. "
+                    "Use Gmail search operators: from:, to:, subject:, newer_than:, has:attachment, OR, etc. "
+                    "For topic-based searches (job, work, invoice, travel) build a query with relevant keywords. "
+                    "Do NOT use web_search for anything email-related."
+                ),
                 description_for_human="Search Gmail",
             ),
             "summarize_inbox": ToolVerb(
@@ -191,10 +207,24 @@ class GmailTool(Tool):
             return ToolResult(success=True, data={"threadId": args["threadId"], "messages": messages})
 
         if verb == "search":
-            data = await self._get("/users/me/messages", params={"q": args["query"], "maxResults": 10})
-            if not data:
-                return ToolResult(success=True, data={"messages": []})
-            return ToolResult(success=True, data={"messages": data.get("messages", [])})
+            limit = min(args.get("limit", 5), 20)
+            data = await self._get("/users/me/messages", params={"q": args["query"], "maxResults": limit})
+            if not data or not data.get("messages"):
+                return ToolResult(success=True, data={"messages": [], "query": args["query"]})
+            messages = []
+            for msg in data["messages"][:limit]:
+                msg_data = await self._get(f"/users/me/messages/{msg['id']}", params={"format": "metadata"})
+                if msg_data:
+                    headers = {h["name"]: h["value"] for h in msg_data.get("payload", {}).get("headers", [])}
+                    messages.append({
+                        "id": msg["id"],
+                        "threadId": msg_data.get("threadId"),
+                        "subject": headers.get("Subject", ""),
+                        "from": headers.get("From", ""),
+                        "date": headers.get("Date", ""),
+                        "snippet": msg_data.get("snippet", ""),
+                    })
+            return ToolResult(success=True, data={"messages": messages, "query": args["query"]})
 
         if verb == "summarize_inbox":
             recent_result = await self.execute("read_recent", {"limit": 10})

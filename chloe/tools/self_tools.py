@@ -104,6 +104,47 @@ class SelfToolsTool(Tool):
                 description_for_model="Archive an identity trait that no longer reflects who Chloe is.",
                 description_for_human="Archive identity trait",
             ),
+            "define_verb": ToolVerb(
+                name="define_verb",
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "tool":          {"type": "string", "description": "Existing tool name to extend (e.g. 'spotify', 'gmail')"},
+                        "verb":          {"type": "string", "description": "New verb name (snake_case)"},
+                        "description":   {"type": "string", "description": "What this verb does — shown to the model"},
+                        "schema":        {"type": "string", "description": "JSON Schema string for the args object"},
+                        "code":          {"type": "string", "description": "Python source that defines `async def run(args) -> ToolResult`"},
+                        "auth_class":    {"type": "string", "description": "free | intimate | kinetic | kinetic-sensitive", "default": "free"},
+                        "reversibility": {"type": "number", "description": "0.0 (irreversible) to 1.0 (fully reversible)", "default": 1.0},
+                    },
+                    "required": ["tool", "verb", "description", "schema", "code"],
+                },
+                auth_class="free",
+                reversibility=0.9,
+                description_for_model=(
+                    "Create or update a dynamic verb on an existing tool. The code must define "
+                    "`async def run(args) -> ToolResult`. Available in the exec namespace: "
+                    "httpx, load_token, refresh_token, get_connection, json, log, ToolResult, args. "
+                    "Use this when you need a capability that doesn't exist yet."
+                ),
+                description_for_human="Define a new tool verb",
+            ),
+            "trigger_consolidation": ToolVerb(
+                name="trigger_consolidation",
+                schema={"type": "object", "properties": {}},
+                auth_class="free",
+                reversibility=1.0,
+                description_for_model="Run nightly memory consolidation: cluster recent episodics → semantic summaries, decay pressures, decay interests.",
+                description_for_human="Run nightly consolidation",
+            ),
+            "trigger_weekly_self_model": ToolVerb(
+                name="trigger_weekly_self_model",
+                schema={"type": "object", "properties": {}},
+                auth_class="free",
+                reversibility=1.0,
+                description_for_model="Run weekly self-modeling: distill procedural rules from feedback, update identity narrative via pro thinking.",
+                description_for_human="Run weekly self-model",
+            ),
         }
 
     async def execute(self, verb: str, args: dict) -> ToolResult:
@@ -119,6 +160,12 @@ class SelfToolsTool(Tool):
             return self._update_preference(args)
         elif verb == "archive_trait":
             return self._archive_trait(args)
+        elif verb == "define_verb":
+            return self._define_verb(args)
+        elif verb == "trigger_consolidation":
+            return await self._trigger_consolidation()
+        elif verb == "trigger_weekly_self_model":
+            return await self._trigger_weekly_self_model()
         return ToolResult(success=False, error=f"Unknown verb: {verb}")
 
     def _set_quiet(self, args: dict) -> ToolResult:
@@ -202,6 +249,62 @@ class SelfToolsTool(Tool):
         log.info("self_preference_updated", key=key)
         return ToolResult(success=True, data={"key": key, "value": value})
 
+    def _define_verb(self, args: dict) -> ToolResult:
+        from chloe.tools.registry import get_registry
+        tool_name = args.get("tool", "").strip()
+        verb_name = args.get("verb", "").strip()
+        description = args.get("description", "").strip()
+        schema_str = args.get("schema", '{"type":"object","properties":{}}')
+        code = args.get("code", "").strip()
+        auth_class = args.get("auth_class", "free")
+        reversibility = float(args.get("reversibility", 1.0))
+
+        if not tool_name or not verb_name or not code:
+            return ToolResult(success=False, error="tool, verb, and code are required")
+
+        registry = get_registry()
+        if tool_name not in registry._tools:
+            return ToolResult(success=False, error=f"Tool '{tool_name}' is not registered")
+
+        # Validate schema JSON
+        try:
+            json.loads(schema_str)
+        except Exception as exc:
+            return ToolResult(success=False, error=f"Invalid schema JSON: {exc}")
+
+        # Validate code compiles and defines run()
+        try:
+            code_obj = compile(code, "<define_verb_check>", "exec")
+        except SyntaxError as exc:
+            return ToolResult(success=False, error=f"Syntax error in code: {exc}")
+        ns: dict = {}
+        exec(code_obj, ns)
+        if "run" not in ns or not callable(ns["run"]):
+            return ToolResult(success=False, error="Code must define `async def run(args)`")
+
+        conn = get_connection()
+        conn.execute(
+            """
+            INSERT INTO dynamic_verbs (tool, verb, description, schema, code, auth_class, reversibility, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(tool, verb) DO UPDATE SET
+                description=excluded.description,
+                schema=excluded.schema,
+                code=excluded.code,
+                auth_class=excluded.auth_class,
+                reversibility=excluded.reversibility,
+                updated_at=excluded.updated_at
+            """,
+            (tool_name, verb_name, description, schema_str, code, auth_class, reversibility),
+        )
+        conn.commit()
+
+        count = registry.load_dynamic_verbs()
+        log.info("dynamic_verb_defined", tool=tool_name, verb=verb_name, total_dynamic=count)
+        return ToolResult(success=True, data={
+            "tool": tool_name, "verb": verb_name, "total_dynamic": count,
+        })
+
     def _archive_trait(self, args: dict) -> ToolResult:
         trait_id = args.get("trait_id", "")
         conn = get_connection()
@@ -214,6 +317,26 @@ class SelfToolsTool(Tool):
             return ToolResult(success=False, error=f"Trait {trait_id!r} not found")
         log.info("self_trait_archived", trait_id=trait_id)
         return ToolResult(success=True, data={"trait_id": trait_id, "archived": True})
+
+    async def _trigger_consolidation(self) -> ToolResult:
+        from chloe.reflect.nightly import run_nightly
+        try:
+            stats = await run_nightly()
+            log.info("trigger_consolidation_done", stats=stats)
+            return ToolResult(success=True, data=stats)
+        except Exception as exc:
+            log.error("trigger_consolidation_failed", error=str(exc))
+            return ToolResult(success=False, error=str(exc))
+
+    async def _trigger_weekly_self_model(self) -> ToolResult:
+        from chloe.reflect.weekly import run_weekly
+        try:
+            stats = await run_weekly()
+            log.info("trigger_weekly_self_model_done", stats=stats)
+            return ToolResult(success=True, data=stats)
+        except Exception as exc:
+            log.error("trigger_weekly_self_model_failed", error=str(exc))
+            return ToolResult(success=False, error=str(exc))
 
     def dry_run(self, verb: str, args: dict) -> str:
         if verb == "set_quiet":
@@ -228,6 +351,8 @@ class SelfToolsTool(Tool):
             return f"Would set preference {args.get('key', '?')} = {args.get('value', '?')!r}"
         elif verb == "archive_trait":
             return f"Would archive trait {args.get('trait_id', '?')}"
+        elif verb == "define_verb":
+            return f"Would define {args.get('tool', '?')}.{args.get('verb', '?')}"
         return super().dry_run(verb, args)
 
 

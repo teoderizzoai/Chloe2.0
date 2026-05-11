@@ -39,6 +39,55 @@ class Memory:
     relevance_note: str = ""
 
 
+def query_fast(rich_q: str, n: int = 12, collection_name: str = "memories_v2") -> list[Memory]:
+    """Single Chroma query, no per-kind partitioning. Used on the chat hot path.
+
+    `query_mixed` runs one Chroma query per kind (4x embedding cost). For chat
+    where we just want the top-N most relevant memories regardless of kind,
+    this is ~4x faster.
+    """
+    if not rich_q or not rich_q.strip():
+        return []
+    try:
+        from chloe.state.chroma import get_collection
+        collection = get_collection(collection_name)
+    except Exception as exc:
+        log.warning("chroma_unavailable", error=str(exc))
+        return []
+
+    total_count = collection.count()
+    if total_count == 0:
+        return []
+
+    try:
+        resp = collection.query(
+            query_texts=[rich_q],
+            n_results=min(n, total_count),
+            include=["documents", "metadatas", "distances"],
+        )
+    except Exception as exc:
+        log.debug("chroma_fast_query_failed", error=str(exc))
+        return []
+
+    ids = resp.get("ids", [[]])[0]
+    metas = resp.get("metadatas", [[]])[0]
+    distances = resp.get("distances", [[]])[0]
+    results: list[Memory] = []
+    for chroma_id, meta, dist in zip(ids, metas, distances):
+        try:
+            mem_id = int(chroma_id)
+        except (TypeError, ValueError):
+            continue
+        score = 1.0 / (1.0 + dist)
+        results.append(_build_memory(mem_id, meta, score))
+
+    if results:
+        _apply_anchor_bonus(results)
+        _apply_inside_joke_bonus(results, rich_q)
+    results.sort(key=lambda m: m.score, reverse=True)
+    return results
+
+
 def query_mixed(
     rich_q: str,
     kinds_mix: dict[str, int] | None = None,
@@ -63,13 +112,18 @@ def query_mixed(
     seen_ids: set[int] = set()
     results: list[Memory] = []
 
+    total_count = collection.count()
+    if total_count == 0:
+        return []
+
     for kind, quota in mix.items():
         if quota <= 0:
             continue
         try:
+            n = min(quota, total_count)
             resp = collection.query(
                 query_texts=[rich_q],
-                n_results=quota,
+                n_results=n,
                 where={"kind": {"$eq": kind}},
                 include=["documents", "metadatas", "distances"],
             )

@@ -153,26 +153,17 @@ def mark_curiosity_surfaced(topic: str) -> None:
     kv_set("curiosity_cooled_topics", json.dumps(data))
 
 
-def curiosity_driven_candidates(is_idle: bool = False):
-    """Only generate curiosity candidates during idle ticks."""
-    if not is_idle:
-        return []
-
+def curiosity_driven_candidates():
+    """Generate curiosity candidates; threshold scoring prevents them firing during high-pressure ticks."""
     from chloe.initiative.candidates import CandidateAction
     raw = generate_curiosity_candidates()
     candidates = []
     for c in raw:
         candidates.append(CandidateAction(
-            tool="gap_flag",
-            verb="surface",
-            args={
-                "subject": f"curiosity: {c.topic}",
-                "description": c.evidence,
-                "suggested_framing": c.question_framing,
-                "kind": "curiosity",
-                "reference_id": c.topic,
-            },
-            intent=f"I'm curious about {c.topic} — {c.question_framing}",
+            tool="messages",
+            verb="send_text",
+            args={"body": ""},  # body composed by engine before gate
+            intent=c.question_framing,
             pressure=c.pressure,
             source="curiosity",
             source_id=f"curiosity:{c.topic}",
