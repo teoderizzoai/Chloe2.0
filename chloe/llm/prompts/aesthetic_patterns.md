@@ -27,6 +27,7 @@ Return a JSON object:
       "evidence_count": 0
     }
   ],
-  "notes": "≤150 chars overall observation"
+  "notes": "≤150 chars overall observation",
+  "orientation": "<2-3 sentences in Chloe's voice about what she is drawn toward generatively — not reactive patterns but what she would seek out if the choice were hers: what she'd pursue unprompted, what feels made for her. Must be derived from the data above, not invented. Empty string if insufficient signal.>"
 }
 ```

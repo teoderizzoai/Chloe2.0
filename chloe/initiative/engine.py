@@ -274,9 +274,14 @@ def _load_affect() -> dict:
 
 
 async def _compose_message_body(action: Action, inner_state: dict, affect: dict) -> str | None:
-    """Call the LLM to write the actual message body from the action's intent."""
+    """Call the LLM to write the actual message body from the action's intent.
+
+    Uses MessageBodyWithDeliberation schema so the model goes through a
+    deliberation step (what it almost said) before committing to the body.
+    The deliberation field is logged internally and never sent to Teo.
+    """
     from chloe.llm.gemini import get_client as get_llm
-    from chloe.llm.schemas import MessageBody
+    from chloe.llm.schemas import MessageBodyWithDeliberation
 
     wants_summary = "; ".join(
         w.get("text", "")[:60] for w in inner_state.get("wants", [])[:2]
@@ -295,10 +300,17 @@ async def _compose_message_body(action: Action, inner_state: dict, affect: dict)
 
     llm = get_llm()
     try:
-        result = await llm.flash("compose_message.md", context, schema=MessageBody)
+        result = await llm.flash("compose_message.md", context, schema=MessageBodyWithDeliberation)
         if result is None:
             return None
-        body = result.get("body", "") if isinstance(result, dict) else getattr(result, "body", "")
+        if isinstance(result, dict):
+            deliberation = result.get("deliberation", "")
+            body = result.get("body", "")
+        else:
+            deliberation = getattr(result, "deliberation", "")
+            body = getattr(result, "body", "")
+        if deliberation:
+            log.info("message_deliberation", intent=action.intent[:60], deliberation=deliberation[:120])
         return body.strip() or None
     except Exception as exc:
         log.warning("compose_message_failed", error=str(exc))

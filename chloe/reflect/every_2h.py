@@ -174,7 +174,7 @@ async def _apply_output(output: ReflectOutput) -> dict:
     from chloe.identity.goals import update_progress, add_goal
     from chloe.memory.store import add as memory_add
 
-    counts = {"wants": 0, "tensions": 0, "interests": 0, "goals": 0, "goal_updates": 0, "world_beliefs": 0, "trait_evidence": 0}
+    counts = {"wants": 0, "tensions": 0, "interests": 0, "goals": 0, "goal_updates": 0, "world_beliefs": 0, "trait_evidence": 0, "anticipations": 0, "questions": 0}
 
     for w in output.new_wants:
         try:
@@ -265,6 +265,46 @@ async def _apply_output(output: ReflectOutput) -> dict:
         except Exception:
             pass
 
+    if output.biased_summary:
+        try:
+            kv_set("reflect:biased_summary", output.biased_summary)
+        except Exception:
+            pass
+
+    for ant in (output.new_anticipations or []):
+        try:
+            conn = get_connection()
+            conn.execute(
+                """INSERT INTO inner_anticipations (text, valence, intensity, target_date)
+                   VALUES (?, ?, ?, ?)""",
+                (ant.text.strip(), ant.valence, ant.intensity, ant.target_date),
+            )
+            conn.commit()
+            counts["anticipations"] += 1
+        except Exception as exc:
+            log.warning("apply_anticipation_failed", error=str(exc))
+
+    for q in (output.new_questions or []):
+        try:
+            conn = get_connection()
+            conn.execute(
+                "INSERT INTO inner_questions (text, domain, intensity) VALUES (?, ?, ?)",
+                (q.text.strip(), q.domain or "world", q.intensity),
+            )
+            conn.commit()
+            counts["questions"] += 1
+        except Exception as exc:
+            log.warning("apply_question_failed", error=str(exc))
+
+    # Novelty signal: decrement deficit when new content surfaces
+    new_content = counts["wants"] + counts["interests"] + counts["world_beliefs"] + counts["questions"]
+    if new_content > 0:
+        try:
+            deficit = float(kv_get("affect:novelty_deficit") or 0.0)
+            kv_set("affect:novelty_deficit", max(0.0, deficit - 0.1 * new_content))
+        except Exception:
+            pass
+
     return counts
 
 
@@ -281,6 +321,12 @@ async def run_reflect(force: bool = False) -> dict | None:
         if not _has_new_signal(last_ts):
             log.info("reflect_skipped_no_signal", last=last_ts)
             kv_set(LAST_REFLECT_KEY, _now().isoformat())  # advance timer
+            # Nothing new — novelty deficit rises
+            try:
+                deficit = float(kv_get("affect:novelty_deficit") or 0.0)
+                kv_set("affect:novelty_deficit", min(1.0, deficit + 0.05))
+            except Exception:
+                pass
             return {"applied": {}, "skipped": "no_signal"}
 
     conn = get_connection()
@@ -319,6 +365,12 @@ async def run_reflect(force: bool = False) -> dict | None:
                 if not noteworthy:
                     log.info("reflect_router_skipped", summary=str(router_result.get("summary", "") if isinstance(router_result, dict) else ""))
                     kv_set(LAST_REFLECT_KEY, _now().isoformat())
+                    # Nothing noteworthy — novelty deficit rises
+                    try:
+                        deficit = float(kv_get("affect:novelty_deficit") or 0.0)
+                        kv_set("affect:novelty_deficit", min(1.0, deficit + 0.05))
+                    except Exception:
+                        pass
                     return {"applied": {}, "skipped": "router_nothing_noteworthy"}
         except Exception as exc:
             log.warning("reflect_router_error", error=str(exc))

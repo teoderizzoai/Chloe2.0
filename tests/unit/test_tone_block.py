@@ -11,19 +11,19 @@ from chloe.affect.dims import AffectState, tone_block
 def test_positive_valence_warm_tone():
     s = AffectState(valence=0.5, arousal=0.4, social_pull=0.5, openness=0.6)
     result = tone_block(s)
-    assert "warm" in result.lower() or "optimistic" in result.lower()
+    assert "lighter" in result.lower() or "landing" in result.lower()
 
 
 def test_negative_valence_subdued_tone():
     s = AffectState(valence=-0.5, arousal=0.4, social_pull=0.5, openness=0.6)
     result = tone_block(s)
-    assert "subdued" in result.lower() or "introspective" in result.lower()
+    assert "carrying" in result.lower() or "present" in result.lower()
 
 
 def test_high_arousal():
     s = AffectState(valence=0.0, arousal=0.9, social_pull=0.5, openness=0.6)
     result = tone_block(s)
-    assert "energized" in result.lower() or "engaged" in result.lower()
+    assert "faster" in result.lower() or "sharpened" in result.lower()
 
 
 def test_low_arousal():
@@ -50,10 +50,10 @@ def test_neutral_state_returns_something():
     assert len(result) > 0
 
 
-def test_at_most_three_lines():
-    s = AffectState(valence=0.5, arousal=0.8, social_pull=0.8, openness=0.6)
+def test_at_most_four_lines():
+    s = AffectState(valence=0.5, arousal=0.8, social_pull=0.8, openness=0.9)
     result = tone_block(s)
-    assert len(result.strip().splitlines()) <= 3
+    assert len(result.strip().splitlines()) <= 4
 
 
 def test_mood_label_not_used_in_chat_api():

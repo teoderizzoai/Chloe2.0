@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from chloe.state.db import get_connection
 from chloe.observability.logging import get_logger
@@ -37,6 +39,7 @@ class Memory:
     archived_tier: str = "hot"
     score: float = 0.0
     relevance_note: str = ""
+    confidential_to: int | None = None
 
 
 def query_fast(
@@ -87,22 +90,26 @@ def query_fast(
     ids = resp.get("ids", [[]])[0]
     metas = resp.get("metadatas", [[]])[0]
     distances = resp.get("distances", [[]])[0]
-    results: list[Memory] = []
-    for chroma_id, meta, dist in zip(ids, metas, distances):
+
+    mem_ids: list[int] = []
+    for cid in ids:
         try:
-            mem_id = int(chroma_id)
+            mem_ids.append(int(cid))
         except (TypeError, ValueError):
-            continue
-        score = 1.0 / (1.0 + dist)
-        results.append(_build_memory(mem_id, meta, score))
+            pass
+
+    results = _batch_build_memories(mem_ids, metas, distances)
 
     if results:
         _apply_anchor_bonus(results)
         _apply_inside_joke_bonus(results, rich_q)
+        _apply_affect_bonus(results)
     results.sort(key=lambda m: m.score, reverse=True)
 
     if rerank and results:
         results = _rerank_with_llm(rich_q, results, keep=rerank_keep, timeout=rerank_timeout)
+    else:
+        results = _mmr(results, n=min(n, len(results)))
 
     return results
 
@@ -237,14 +244,22 @@ def query_mixed(
         metas = resp.get("metadatas", [[]])[0]
         distances = resp.get("distances", [[]])[0]
 
-        for chroma_id, meta, dist in zip(ids, metas, distances):
-            mem_id = int(chroma_id)
-            if mem_id in seen_ids:
+        batch_ids: list[int] = []
+        batch_metas: list[dict] = []
+        batch_dists: list[float] = []
+        for cid, meta, dist in zip(ids, metas, distances):
+            try:
+                mid = int(cid)
+            except (TypeError, ValueError):
                 continue
-            seen_ids.add(mem_id)
+            if mid in seen_ids:
+                continue
+            seen_ids.add(mid)
+            batch_ids.append(mid)
+            batch_metas.append(meta)
+            batch_dists.append(dist)
 
-            score = 1.0 / (1.0 + dist)
-            mem = _build_memory(mem_id, meta, score)
+        for mem in _batch_build_memories(batch_ids, batch_metas, batch_dists):
             results.append(mem)
 
     if results:
@@ -256,49 +271,135 @@ def query_mixed(
 
 
 def add_to_chroma(memory_id: int, text: str, kind: str, source: str | None,
-                  artifact_refs: list, collection_name: str = "memories_v2") -> None:
+                  artifact_refs: list, collection_name: str = "memories_v2",
+                  emotional_valence: float | None = None,
+                  emotional_arousal: float | None = None) -> None:
     """Insert or update a memory document in ChromaDB."""
     try:
         from chloe.state.chroma import get_collection
         collection = get_collection(collection_name)
+        meta: dict = {
+            "kind": kind,
+            "source": source or "",
+            "has_artifact": 1 if artifact_refs else 0,
+        }
+        if emotional_valence is not None:
+            meta["emotional_valence"] = emotional_valence
+        if emotional_arousal is not None:
+            meta["emotional_arousal"] = emotional_arousal
         collection.upsert(
             ids=[str(memory_id)],
             documents=[text],
-            metadatas=[{
-                "kind": kind,
-                "source": source or "",
-                "has_artifact": 1 if artifact_refs else 0,
-            }],
+            metadatas=[meta],
         )
     except Exception as exc:
         log.warning("chroma_add_failed", memory_id=memory_id, error=str(exc))
 
 
-def _build_memory(mem_id: int, meta: dict, score: float) -> Memory:
+def _recency_decay(created_at: str) -> float:
+    """Exponential recency decay, half-life ~20 days."""
+    if not created_at:
+        return 1.0
+    try:
+        ts = datetime.fromisoformat(created_at)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        days_old = max(0, (datetime.now(timezone.utc) - ts).days)
+        return math.exp(-days_old / 30)
+    except Exception:
+        return 1.0
+
+
+def _batch_build_memories(
+    ids: list[int],
+    metas: list[dict],
+    distances: list[float],
+) -> list[Memory]:
+    """Batch SQLite fetch for all IDs, then apply compound scoring."""
+    if not ids:
+        return []
     conn = get_connection()
-    row = conn.execute(
-        "SELECT * FROM memories WHERE id = ?", (mem_id,)
-    ).fetchone()
-    if row is None:
-        return Memory(id=mem_id, kind=meta.get("kind", "episodic"), text="",
-                      score=score)
-    return Memory(
-        id=row["id"],
-        kind=row["kind"],
-        text=row["text"],
-        source=row["source"],
-        source_ref=row["source_ref"],
-        weight=row["weight"],
-        salience=row["salience"],
-        confidence=row["confidence"],
-        emotional_valence=row["emotional_valence"],
-        emotional_arousal=row["emotional_arousal"],
-        tags=json.loads(row["tags"]) if row["tags"] else [],
-        artifact_refs=json.loads(row["artifact_refs"]) if row["artifact_refs"] else [],
-        created_at=row["created_at"] or "",
-        archived_tier=row["archived_tier"],
-        score=score,
-    )
+    placeholders = ",".join("?" * len(ids))
+    rows = conn.execute(
+        f"SELECT * FROM memories WHERE id IN ({placeholders})", ids
+    ).fetchall()
+    row_by_id = {row["id"]: row for row in rows}
+
+    results: list[Memory] = []
+    for mem_id, meta, dist in zip(ids, metas, distances):
+        cosine = 1.0 / (1.0 + dist)
+        row = row_by_id.get(mem_id)
+        if row is None:
+            results.append(Memory(id=mem_id, kind=meta.get("kind", "episodic"),
+                                  text="", score=cosine))
+            continue
+        salience = float(row["salience"] or 0.5)
+        created_at = row["created_at"] or ""
+        score = cosine * salience * _recency_decay(created_at)
+        results.append(Memory(
+            id=row["id"],
+            kind=row["kind"],
+            text=row["text"],
+            source=row["source"],
+            source_ref=row["source_ref"],
+            weight=row["weight"],
+            salience=salience,
+            confidence=row["confidence"],
+            emotional_valence=row["emotional_valence"],
+            emotional_arousal=row["emotional_arousal"],
+            tags=json.loads(row["tags"]) if row["tags"] else [],
+            artifact_refs=json.loads(row["artifact_refs"]) if row["artifact_refs"] else [],
+            created_at=created_at,
+            archived_tier=row["archived_tier"],
+            score=score,
+            confidential_to=row["confidential_to"] if "confidential_to" in row.keys() else None,
+        ))
+    return results
+
+
+def _mmr(candidates: list[Memory], n: int = 8, lambda_: float = 0.6) -> list[Memory]:
+    """Maximal Marginal Relevance — trades a little relevance for diversity."""
+    if len(candidates) <= n:
+        return candidates
+    selected = [candidates[0]]
+    remaining = list(candidates[1:])
+    while len(selected) < n and remaining:
+        best = max(
+            remaining,
+            key=lambda c: lambda_ * c.score
+                          - (1 - lambda_) * max(_text_overlap(c, s) for s in selected),
+        )
+        selected.append(best)
+        remaining.remove(best)
+    return selected
+
+
+def _text_overlap(a: Memory, b: Memory) -> float:
+    """Jaccard similarity on lowercased word sets — no embedding needed."""
+    wa = set(a.text.lower().split())
+    wb = set(b.text.lower().split())
+    if not wa or not wb:
+        return 0.0
+    return len(wa & wb) / len(wa | wb)
+
+
+def _apply_affect_bonus(memories: list[Memory]) -> None:
+    """Boost memories whose emotional valence aligns with Chloe's current affect.
+
+    Mood-congruent recall: low-valence states surface heavier memories;
+    positive states surface warmer ones. Max bonus is 0.08 to keep it subtle.
+    """
+    try:
+        from chloe.affect.dims import load as load_affect
+        affect = load_affect()
+        current_valence = affect.valence
+    except Exception:
+        return
+    for m in memories:
+        if m.emotional_valence is None:
+            continue
+        alignment = 1.0 - abs(m.emotional_valence - current_valence)
+        m.score += 0.08 * alignment
 
 
 def _apply_inside_joke_bonus(memories: list[Memory], query: str) -> None:

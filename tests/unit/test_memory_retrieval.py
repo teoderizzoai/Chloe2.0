@@ -126,7 +126,18 @@ def test_anchor_bonus_applied():
     )
     conn.commit()
 
+    # Add an identical memory without an artifact ref to compare scores
+    plain_id = add(
+        kind="episodic",
+        text="I queued a track for Teo",
+        source="action",
+        collection_name=COLLECTION,
+    )
+
     results = query_mixed("track song music queue", collection_name=COLLECTION)
-    matching = [m for m in results if m.id == mem_id]
-    assert len(matching) == 1
-    assert matching[0].score > (1.0 / 2.0)  # above raw cosine min — anchor bonus applied
+    anchor_mem = next((m for m in results if m.id == mem_id), None)
+    plain_mem = next((m for m in results if m.id == plain_id), None)
+    assert anchor_mem is not None
+    assert plain_mem is not None
+    # Anchor memory should score higher due to the bonus
+    assert anchor_mem.score > plain_mem.score

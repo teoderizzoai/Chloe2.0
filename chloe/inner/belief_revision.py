@@ -306,7 +306,39 @@ async def _check_consistency_async_and_log(topic: str, belief: str) -> None:
 
 
 def _open_belief_tension(new_belief_id: int, conflict_id: int, topic: str) -> None:
-    """Create an inner_tension that reflects the unresolved belief conflict."""
+    """Create an inner_tension reflecting an unresolved belief conflict.
+
+    When neither belief has high enough confidence to dominate, marks both as
+    ambivalent rather than forcing adjudication — holding the contradiction
+    without resolving it.
+    """
+    conn = get_connection()
+    try:
+        new_row = conn.execute(
+            "SELECT confidence FROM world_beliefs WHERE id=?", (new_belief_id,)
+        ).fetchone()
+        old_row = conn.execute(
+            "SELECT confidence FROM world_beliefs WHERE id=?", (conflict_id,)
+        ).fetchone()
+
+        if new_row and old_row:
+            new_conf = float(new_row["confidence"] or 0.0)
+            old_conf = float(old_row["confidence"] or 0.0)
+            if new_conf < 0.55 and old_conf < 0.55:
+                conn.execute(
+                    "UPDATE world_beliefs SET ambivalent=1, ambivalent_with=? WHERE id=?",
+                    (conflict_id, new_belief_id),
+                )
+                conn.execute(
+                    "UPDATE world_beliefs SET ambivalent=1, ambivalent_with=? WHERE id=?",
+                    (new_belief_id, conflict_id),
+                )
+                conn.commit()
+                log.info("belief_ambivalent_pair_marked", a=new_belief_id, b=conflict_id, topic=topic)
+                return  # Ambivalence, not a tension to resolve
+    except Exception as exc:
+        log.warning("ambivalent_marking_failed", error=str(exc))
+
     from chloe.inner.pressure import add_tension
     try:
         add_tension(

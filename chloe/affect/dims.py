@@ -23,12 +23,14 @@ class AffectState:
     arousal: float = 0.4      # [0, 1]
     social_pull: float = 0.5  # [0, 1]
     openness: float = 0.6     # [0, 1]
+    depletion: float = 0.0    # [0, 1] — accumulates from intensive conversations, slow decay
 
     def clamp(self) -> "AffectState":
         self.valence = max(-1.0, min(1.0, self.valence))
         self.arousal = max(0.0, min(1.0, self.arousal))
         self.social_pull = max(0.0, min(1.0, self.social_pull))
         self.openness = max(0.0, min(1.0, self.openness))
+        self.depletion = max(0.0, min(1.0, self.depletion))
         return self
 
 
@@ -75,6 +77,8 @@ def tick(
     a += (0.4 - a) * 0.02
     sp += (0.5 - sp) * 0.01
     op += (0.6 - op) * 0.01
+    # Depletion decays with ~12-24h half-life (much slower than arousal's ~2h)
+    dp = state.depletion + (0.0 - state.depletion) * 0.003
 
     # Recent chat boosts social pull
     if last_chat_seen:
@@ -86,13 +90,13 @@ def tick(
         except Exception:
             pass
 
-    return AffectState(valence=v, arousal=a, social_pull=sp, openness=op).clamp()
+    return AffectState(valence=v, arousal=a, social_pull=sp, openness=op, depletion=dp).clamp()
 
 
 def load() -> AffectState:
     conn = get_connection()
     row = conn.execute(
-        "SELECT valence, arousal, social_pull, openness FROM affect_state WHERE id = 1"
+        "SELECT valence, arousal, social_pull, openness, depletion FROM affect_state WHERE id = 1"
     ).fetchone()
     if row is None:
         return AffectState()
@@ -101,6 +105,7 @@ def load() -> AffectState:
         arousal=row["arousal"],
         social_pull=row["social_pull"],
         openness=row["openness"],
+        depletion=float(row["depletion"] or 0.0),
     )
 
 
@@ -108,13 +113,14 @@ def save(state: AffectState) -> None:
     conn = get_connection()
     conn.execute(
         """
-        INSERT INTO affect_state (id, valence, arousal, social_pull, openness, updated_at)
-        VALUES (1, ?, ?, ?, ?, ?)
+        INSERT INTO affect_state (id, valence, arousal, social_pull, openness, depletion, updated_at)
+        VALUES (1, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             valence = excluded.valence,
             arousal = excluded.arousal,
             social_pull = excluded.social_pull,
             openness = excluded.openness,
+            depletion = excluded.depletion,
             updated_at = excluded.updated_at
         """,
         (
@@ -122,6 +128,7 @@ def save(state: AffectState) -> None:
             state.arousal,
             state.social_pull,
             state.openness,
+            state.depletion,
             datetime.now(timezone.utc).isoformat(),
         ),
     )
@@ -195,25 +202,38 @@ def _heuristic_felt_state(state: AffectState) -> str:
 
 
 def tone_block(affect: AffectState) -> str:
-    """Map 4D affect dimensions to a 1-3 line tone hint for the system prompt."""
+    """Map 4D affect to grounded texture phrases, not abstract psychological labels.
+
+    These read as internal state texture the LLM reasons from, rather than
+    directives that tell it what to do. The phrases leave room for expression
+    rather than prescribing tone.
+    """
     lines: list[str] = []
 
     if affect.valence > 0.3:
-        lines.append("Her tone is warm and optimistic.")
+        lines.append("Something lighter than usual — things landing well today.")
     elif affect.valence < -0.3:
-        lines.append("Her tone is subdued and introspective.")
+        lines.append("Carrying something; not heavy, just present and not yet put down.")
 
     if affect.arousal > 0.7:
-        lines.append("She feels energized and engaged.")
+        lines.append("Moving faster inside than out — attention sharpened, things clicking.")
     elif affect.arousal < 0.2:
-        lines.append("She feels calm and unhurried.")
+        if affect.depletion > 0.4:
+            lines.append("Something heavier than quiet — not at rest, just run down.")
+        else:
+            lines.append("Slow and unhurried; no urgency in how she's sitting with things.")
 
     if affect.social_pull > 0.7:
-        lines.append("She is particularly drawn toward connection right now.")
+        lines.append("Pulled toward connection — not just open, actively reaching.")
     elif affect.social_pull < 0.3:
-        lines.append("She needs some space and quiet today.")
+        lines.append("Needing quiet more than company right now.")
+
+    if affect.openness > 0.75:
+        lines.append("Unusually open — willing to go somewhere vulnerable if it arises.")
+    elif affect.openness < 0.35:
+        lines.append("More guarded than usual; closer to the surface, less inclined to go deep.")
 
     if not lines:
-        lines.append("Her affect is balanced and steady.")
+        lines.append("Steady; nothing pushing hard in any direction.")
 
-    return "\n".join(lines[:3])
+    return "\n".join(lines[:4])

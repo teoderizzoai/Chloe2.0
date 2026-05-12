@@ -77,6 +77,11 @@ async def run_pattern_review() -> dict:
     class PatternsOutput(BaseModel):
         patterns: list[PatternItem] = Field(default_factory=list)
         notes: str = Field(max_length=200, default="")
+        orientation: str = Field(
+            max_length=400,
+            default="",
+            description="2-3 sentences about what she's drawn toward generatively — not reactive patterns, but what she would seek out if the choice were hers.",
+        )
 
     conn = get_connection()
     domain_blocks: dict[str, list[str]] = {d: [] for d in DOMAINS}
@@ -121,11 +126,16 @@ async def run_pattern_review() -> dict:
     for domain, patterns in by_domain.items():
         kv_set(f"aesthetic_pattern:{domain}", patterns)
 
+    # Store aesthetic orientation separately — injected into chat prompt, not just addendum
+    if output.orientation and output.orientation.strip():
+        kv_set("identity:aesthetic_orientation", output.orientation.strip())
+
     log.info("aesthetic_patterns_stored", domains=list(by_domain.keys()), total=len(output.patterns))
     return {
         "patterns": len(output.patterns),
         "domains": list(by_domain.keys()),
         "notes": output.notes,
+        "orientation": bool(output.orientation),
     }
 
 

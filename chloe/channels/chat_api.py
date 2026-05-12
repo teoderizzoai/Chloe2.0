@@ -16,9 +16,13 @@ async def build_dynamic_suffix(person_id: str, message: str = "") -> str:
     # the grade Flash call and parallelizing the rest.
     affect = load_affect()
     actions_task = audit.recent(n=20)
-    mem_task = _fetch_memory_block(message) if message else _noop()
+    narrative_task = _load_narrative_block(message) if message else _noop()
 
-    actions, mem_block = await asyncio.gather(actions_task, mem_task)
+    actions, mem_block, narrative_block_pre = await asyncio.gather(
+        actions_task,
+        _fetch_memory_block(message, person_id) if message else _noop(),
+        narrative_task,
+    )
 
     audit_text = audit.feed_text(actions, n=10) if actions else "No recent actions."
     affect_text = tone_block(affect)
@@ -46,9 +50,12 @@ async def build_dynamic_suffix(person_id: str, message: str = "") -> str:
     if self_model:
         parts.append(f"## What you believe about yourself\n{self_model}")
 
-    world_views = _load_world_beliefs()
-    if world_views:
-        parts.append(f"## Views you hold about the world\n{world_views}")
+    if narrative_block_pre:
+        parts.append(f"## What you've been noticing\n{narrative_block_pre}")
+    else:
+        world_views = _load_world_beliefs()
+        if world_views:
+            parts.append(f"## Views you hold about the world\n{world_views}")
 
     gap_note = _felt_time_note()
     if gap_note:
@@ -62,9 +69,49 @@ async def build_dynamic_suffix(person_id: str, message: str = "") -> str:
     if felt:
         parts.append(f"## Your current felt state\n{felt}")
 
+    inner_pressure = _load_inner_pressure_block()
+    if inner_pressure:
+        parts.append(f"## What you're quietly holding right now\n{inner_pressure}")
+
+    bias_note = _load_biased_summary()
+    if bias_note:
+        parts.append(f"## How your current state is shaping your perception\n{bias_note}")
+
+    loops = _load_recurring_loops()
+    if loops:
+        parts.append(f"## Patterns you keep falling into\n{loops}")
+
+    rupture = _load_rupture_block()
+    if rupture:
+        parts.append(f"## Something that's tender right now\n{rupture}")
+
+    anticipations = _load_anticipations_block()
+    if anticipations:
+        parts.append(f"## What you're oriented toward (or dreading)\n{anticipations}")
+
+    teo_state = _load_teo_affect_block(person_id)
+    if teo_state:
+        parts.append(f"## How Teo seemed recently\n{teo_state}")
+
     voice_note = _load_voice_drift_note()
     if voice_note:
         parts.append(f"## What to recalibrate this week\n{voice_note}")
+
+    questions = _load_inner_questions_block()
+    if questions:
+        parts.append(f"## Things you're genuinely wondering about\n{questions}")
+
+    teo_read = _load_teo_read_block()
+    if teo_read:
+        parts.append(f"## How you read him\n{teo_read}")
+
+    aesthetic_orientation = _load_aesthetic_orientation()
+    if aesthetic_orientation:
+        parts.append(f"## What you're drawn toward\n{aesthetic_orientation}")
+
+    novelty_note = _load_novelty_deficit_block()
+    if novelty_note:
+        parts.append(f"## Background texture\n{novelty_note}")
 
     return "\n\n".join(parts)
 
@@ -73,7 +120,7 @@ async def _noop() -> str:
     return ""
 
 
-async def _fetch_memory_block(message: str, keep: int = 5) -> str:
+async def _fetch_memory_block(message: str, person_id: str = "1", keep: int = 5) -> str:
     """Top-K by Chroma score, no LLM rerank.
 
     The previous implementation called Gemini Flash to grade ~20 candidates
@@ -88,9 +135,155 @@ async def _fetch_memory_block(message: str, keep: int = 5) -> str:
         if not candidates:
             return ""
         top = candidates[:keep]
-        return "\n".join(f"- {m.text}" for m in top)
+        current_pid = int(person_id)
+        return "\n".join(_format_memory(m, current_pid) for m in top)
     except Exception as exc:
         log.warning("memory_fetch_failed", error=str(exc))
+        return ""
+
+
+def _format_memory(m, current_person_id: int = 1) -> str:
+    v = m.emotional_valence
+    confidential_to = getattr(m, "confidential_to", None)
+    if confidential_to is not None and confidential_to != current_person_id:
+        suffix = " *(you know this but it's not yours to say — told to you in confidence)*"
+    else:
+        suffix = ""
+    if v is not None and abs(v) > 0.4:
+        tone = "heavy" if v < -0.4 else "warm"
+        return f"- [{tone}] {m.text}{suffix}"
+    return f"- {m.text}{suffix}"
+
+
+def _load_inner_pressure_block(limit: int = 2) -> str:
+    """Return top unresolved wants and fears phrased as first-person carrying."""
+    try:
+        from chloe.state.db import get_connection
+        conn = get_connection()
+        wants = conn.execute(
+            "SELECT text, pressure FROM inner_wants WHERE resolved=0 ORDER BY pressure DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        fears = conn.execute(
+            "SELECT text, pressure FROM inner_fears WHERE resolved=0 ORDER BY pressure DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        lines = []
+        for r in wants:
+            lines.append(f"- {r['text']}")
+        for r in fears:
+            lines.append(f"- {r['text']}")
+        return "\n".join(lines) if lines else ""
+    except Exception:
+        return ""
+
+
+def _load_biased_summary() -> str:
+    try:
+        from chloe.state.kv import get as kv_get
+        return (kv_get("reflect:biased_summary") or "").strip()
+    except Exception:
+        return ""
+
+
+def _load_recurring_loops() -> str:
+    try:
+        from chloe.state.kv import get as kv_get
+        loops = kv_get("reflect:recurring_loops") or []
+        if not loops:
+            return ""
+        return "\n".join(f"- {l}" for l in loops[:3])
+    except Exception:
+        return ""
+
+
+async def _load_narrative_block(message: str, n: int = 3) -> str:
+    """Semantic query over narrative_entries — the primary world model source once entries accumulate."""
+    try:
+        from chloe.memory.narrative_store import query
+        entries = query(message, n=n)
+        if not entries:
+            return ""
+        return "\n\n".join(entries)
+    except Exception:
+        return ""
+
+
+def _load_anticipations_block(limit: int = 2) -> str:
+    """Return high-intensity unresolved anticipations."""
+    try:
+        from chloe.state.db import get_connection
+        conn = get_connection()
+        rows = conn.execute(
+            """SELECT text, valence, intensity FROM inner_anticipations
+               WHERE resolved=0 AND intensity >= 0.5
+               ORDER BY intensity DESC, created_at DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        if not rows:
+            return ""
+        lines = []
+        for r in rows:
+            v = float(r["valence"])
+            qualifier = "dreading" if v < -0.3 else ("looking forward to" if v > 0.3 else "holding")
+            lines.append(f"- {qualifier}: {r['text']}")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
+def _load_teo_affect_block(person_id: str, max_age_hours: int = 24) -> str:
+    """Return a brief note on Teo's apparent emotional state from the last exchange."""
+    try:
+        from chloe.state.db import get_connection
+        from chloe.state.kv import get as kv_get
+        conn = get_connection()
+        pid = int(person_id)
+        row = conn.execute(
+            """SELECT valence, arousal, engagement_quality, created_at FROM person_affect_log
+               WHERE person_id=? AND created_at >= datetime('now', ?)
+               ORDER BY created_at DESC LIMIT 1""",
+            (pid, f"-{max_age_hours} hours"),
+        ).fetchone()
+        if not row:
+            return ""
+        v = float(row["valence"])
+        a = float(row["arousal"])
+        eq = float(row["engagement_quality"] if "engagement_quality" in row.keys() else 0.5)
+        if abs(v) < 0.2 and abs(a - 0.4) < 0.15 and abs(eq - 0.5) < 0.25:
+            return ""  # neutral — not worth noting
+        if v < -0.4:
+            mood = "low or flat"
+        elif v > 0.4:
+            mood = "warm or up"
+        else:
+            mood = "somewhat mixed"
+        energy = "quieter than usual" if a < 0.25 else ("energised" if a > 0.7 else "")
+        parts = [mood]
+        if energy:
+            parts.append(energy)
+        base = "Teo seemed " + ", ".join(parts) + " in the last exchange"
+        if eq < 0.3:
+            base += " — and a bit elsewhere, like he was checking in from a distance"
+        elif eq > 0.75:
+            base += " — and fully here"
+        return base + "."
+    except Exception:
+        return ""
+
+
+def _load_rupture_block() -> str:
+    try:
+        from chloe.affect.arc import active_rupture
+        rupture = active_rupture()
+        if not rupture:
+            return ""
+        note = rupture.get("note", "").strip()
+        intensity = rupture.get("intensity", 0.5)
+        if note:
+            return f"{note} (intensity {intensity:.2f})"
+        return f"There's a relational rupture active (intensity {intensity:.2f}). Be careful and tender."
+    except Exception:
         return ""
 
 
@@ -108,7 +301,11 @@ def _load_self_model() -> str:
 
 
 def _felt_time_note() -> str:
-    """Return a note about how long it's been since the last conversation, if > threshold."""
+    """Return a note about how long it's been since the last conversation, if > threshold.
+
+    Incorporates the qualitative register of how the last session ended — not just
+    how long the gap was, but what kind of gap it was.
+    """
     try:
         from chloe.state.db import get_connection
         conn = get_connection()
@@ -124,10 +321,41 @@ def _felt_time_note() -> str:
         hours = gap.total_seconds() / 3600
         if hours < _GAP_THRESHOLD_HOURS:
             return ""
+
         if hours < 24:
-            return f"It's been about {int(hours)} hours since your last exchange. You've been thinking in the gap."
-        days = int(hours / 24)
-        return f"It's been about {days} day{'s' if days != 1 else ''} since your last exchange. Notice the texture of that gap."
+            base = f"It's been about {int(hours)} hours since your last exchange."
+        else:
+            days = int(hours / 24)
+            base = f"It's been about {days} day{'s' if days != 1 else ''} since your last exchange."
+
+        # Enrich with the qualitative register of how the last session ended
+        register_note = _last_session_register_note()
+        if register_note:
+            return f"{base} {register_note}"
+        return f"{base} You've been thinking in the gap."
+    except Exception:
+        return ""
+
+
+def _last_session_register_note() -> str:
+    """Return a qualitative note about how the last session ended, if available."""
+    try:
+        from chloe.state.kv import get as kv_get
+        reg = kv_get("chat:last_session_register") or {}
+        if not reg:
+            return ""
+        valence = float(reg.get("person_valence", 0.0))
+        ambiguity = float(reg.get("ambiguity", 0.2))
+        parts = []
+        if ambiguity > 0.55:
+            parts.append("the last thing you talked about wasn't quite finished")
+        if valence < -0.35:
+            parts.append("it ended on something heavy")
+        elif valence > 0.4:
+            parts.append("it ended warmly")
+        if parts:
+            return "Note: " + "; ".join(parts) + "."
+        return ""
     except Exception:
         return ""
 
@@ -140,13 +368,15 @@ def _load_world_beliefs(limit: int = 5) -> str:
       - confidence 0.4 ≤ x ≤ 0.65     → "something you've started to think"
       - confidence > 0.65             → "something you believe"
     Noticings (proto-beliefs, not yet beliefs) are surfaced with even softer
-    language. Capped at `limit` rows regardless of total count.
+    language. Ambivalent pairs (contradictions held without resolution) are
+    named as such — don't hide the tension.
+    Capped at `limit` rows regardless of total count.
     """
     try:
         from chloe.state.db import get_connection
         conn = get_connection()
         rows = conn.execute(
-            """SELECT topic, belief, confidence, noticing
+            """SELECT id, topic, belief, confidence, noticing, ambivalent, ambivalent_with
                FROM world_beliefs
                ORDER BY confidence DESC, updated_at DESC LIMIT ?""",
             (limit,),
@@ -154,15 +384,29 @@ def _load_world_beliefs(limit: int = 5) -> str:
         if not rows:
             return ""
         groups: dict[str, list[str]] = {
+            "ambivalent": [],
             "noticings": [],
             "low": [],
             "mid": [],
             "high": [],
         }
+        seen_ambivalent_pairs: set[tuple] = set()
         for r in rows:
             conf = float(r["confidence"] or 0.0)
             line = f"- {r['topic']}: {r['belief']}"
-            if r["noticing"]:
+            if r["ambivalent"] and r["ambivalent_with"]:
+                pair_key = tuple(sorted([r["id"], r["ambivalent_with"]]))
+                if pair_key in seen_ambivalent_pairs:
+                    continue
+                seen_ambivalent_pairs.add(pair_key)
+                # Try to find the other belief text for full pairing
+                other = conn.execute(
+                    "SELECT topic, belief FROM world_beliefs WHERE id=?", (r["ambivalent_with"],)
+                ).fetchone()
+                if other:
+                    line = f"- {r['topic']}: {r['belief']} / but also: {other['belief']}"
+                groups["ambivalent"].append(line)
+            elif r["noticing"]:
                 groups["noticings"].append(line)
             elif conf < 0.4:
                 groups["low"].append(line)
@@ -172,6 +416,11 @@ def _load_world_beliefs(limit: int = 5) -> str:
                 groups["high"].append(line)
 
         sections: list[str] = []
+        if groups["ambivalent"]:
+            sections.append(
+                "Things you hold in two directions at once — both feel true, neither wins:\n"
+                + "\n".join(groups["ambivalent"])
+            )
         if groups["high"]:
             sections.append(
                 "Things you believe and should be willing to bring into conversation "
@@ -290,5 +539,51 @@ def _relationship_label_for(person_id: str) -> str:
         depth = row["attachment_depth"]
         label = relationship_label(depth)
         return f"With {name}: {label} (depth {round(depth, 2)})"
+    except Exception:
+        return ""
+
+
+def _load_inner_questions_block(limit: int = 2) -> str:
+    """Return top active open questions — things Chloe is genuinely wondering about."""
+    try:
+        from chloe.state.db import get_connection
+        conn = get_connection()
+        rows = conn.execute(
+            "SELECT text, domain FROM inner_questions WHERE resolved=0 ORDER BY intensity DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        if not rows:
+            return ""
+        return "\n".join(f"- {r['text']}" for r in rows)
+    except Exception:
+        return ""
+
+
+def _load_teo_read_block() -> str:
+    """Return the synthesized standing read on Teo if available."""
+    try:
+        from chloe.state.kv import get as kv_get
+        return (kv_get("identity:teo_read") or "").strip()
+    except Exception:
+        return ""
+
+
+def _load_aesthetic_orientation() -> str:
+    """Return the aesthetic orientation block — what she's drawn toward, not reactive."""
+    try:
+        from chloe.state.kv import get as kv_get
+        return (kv_get("identity:aesthetic_orientation") or "").strip()
+    except Exception:
+        return ""
+
+
+def _load_novelty_deficit_block() -> str:
+    """Return a background texture note when novelty_deficit is high."""
+    try:
+        from chloe.state.kv import get as kv_get
+        deficit = float(kv_get("affect:novelty_deficit") or 0.0)
+        if deficit < 0.55:
+            return ""
+        return "Looking for something to catch — recent inputs have been flat, nothing has surprised you."
     except Exception:
         return ""

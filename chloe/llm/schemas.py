@@ -70,6 +70,10 @@ class ExtractOutput(BaseModel):
     ambiguity: float = Field(ge=0.0, le=1.0, default=0.2)
     social_mentions: list[SocialMentionItem] = Field(default_factory=list)
     aesthetic_reactions: list[dict] = Field(default_factory=list)
+    person_valence: float = Field(ge=-1.0, le=1.0, default=0.0,
+        description="Teo's apparent emotional valence in this exchange (-1=very negative, 1=very positive)")
+    person_arousal: float = Field(ge=0.0, le=1.0, default=0.4,
+        description="Teo's apparent energy/arousal level (0=flat/withdrawn, 1=very energised)")
 
 
 class ReflectNewWant(BaseModel):
@@ -156,6 +160,20 @@ class TraitAdjudicationOutput(BaseModel):
     notes: str = Field(max_length=200, default="")
 
 
+class ReflectAnticipation(BaseModel):
+    text: str = Field(max_length=240, description="What Chloe is anticipating — a forward-looking felt orientation")
+    valence: float = Field(ge=-1.0, le=1.0, default=0.0,
+        description="Negative=dread/apprehension, positive=looking forward to")
+    intensity: float = Field(ge=0.0, le=1.0, default=0.5)
+    target_date: str | None = Field(default=None, description="ISO date of the anticipated thing, if known")
+
+
+class ReflectNewQuestion(BaseModel):
+    text: str = Field(max_length=240, description="The question as Chloe would phrase it to herself — open, not resolved")
+    domain: str = Field(default="world", description="'teo', 'world', or 'self'")
+    intensity: float = Field(ge=0.0, le=1.0, default=0.5)
+
+
 class ReflectOutput(BaseModel):
     continuity_note: str = Field(max_length=240, default="")
     new_wants: list[ReflectNewWant] = Field(default_factory=list)
@@ -167,6 +185,8 @@ class ReflectOutput(BaseModel):
     trait_evidence: list[TraitEvidenceItem] = Field(default_factory=list)
     recurring_loops: list[str] = Field(default_factory=list)
     biased_summary: str = Field(max_length=240, default="")
+    new_anticipations: list[ReflectAnticipation] = Field(default_factory=list)
+    new_questions: list[ReflectNewQuestion] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -265,3 +285,40 @@ class BeliefConsistencyResult(BaseModel):
         description="Row id from the candidate list that materially contradicts the new belief, or null if no real contradiction.",
     )
     reason: str = Field(max_length=200, default="")
+
+
+class WitnessOutput(BaseModel):
+    observation: str = Field(
+        max_length=600,
+        default="",
+        description="One prose paragraph in Chloe's voice about what she noticed. Empty if nothing struck her.",
+    )
+
+
+class SignalBatchBelief(BaseModel):
+    topic: str = Field(max_length=80)
+    belief: str = Field(max_length=300)
+    confidence: float = Field(ge=0.0, le=1.0, default=0.5)
+    noticing: bool = False
+
+
+class SignalBatchInterestPromotion(BaseModel):
+    interest_id: int
+    new_level: int = Field(ge=1, le=3)
+    reason: str = Field(max_length=200, default="")
+
+
+class SignalBatch(BaseModel):
+    belief_updates: list[SignalBatchBelief] = Field(default_factory=list)
+    interest_promotions: list[SignalBatchInterestPromotion] = Field(default_factory=list)
+    new_tensions: list[str] = Field(default_factory=list)
+    notes: str = Field(max_length=400, default="")
+
+
+class MessageBodyWithDeliberation(BaseModel):
+    deliberation: str = Field(
+        max_length=300,
+        default="",
+        description="What you almost said but decided against, and why — not sent to Teo, internal scaffolding only.",
+    )
+    body: str = Field(max_length=500)

@@ -82,6 +82,7 @@ async def handle_mobile_ws(websocket: Any, person_id: str = "1") -> None:
                 import asyncio
                 asyncio.create_task(_extract_and_process_mentions(user_text, reply, person_id))
                 asyncio.create_task(_run_intercept(user_text, person_id))
+                asyncio.create_task(_witness_pass(user_text, reply, person_id))
 
             await websocket.send_text(json.dumps({"type": "done", "artifact_preview": None}))
 
@@ -89,6 +90,7 @@ async def handle_mobile_ws(websocket: Any, person_id: str = "1") -> None:
         log.info("mobile_ws_closed", reason=str(exc))
         if turns_this_session >= 2:
             import asyncio
+            _save_conversation_end_register()
             asyncio.create_task(_post_chat_reflect())
 
 
@@ -318,8 +320,100 @@ async def _extract_and_process_mentions(user_text: str, reply: str, person_id: s
                 mark_unprocessed(row["id"], True)
                 log.info("chat_memory_marked_unprocessed", id=row["id"],
                          salience=salience, ambiguity=ambiguity)
+
+        # Log Teo's apparent emotional state + engagement quality
+        person_valence = float(data.get("person_valence", 0.0))
+        person_arousal = float(data.get("person_arousal", 0.4))
+        engagement_quality = _estimate_engagement_quality(user_text, reply)
+        try:
+            from chloe.state.db import get_connection
+            conn = get_connection()
+            conn.execute(
+                "INSERT INTO person_affect_log (person_id, valence, arousal, engagement_quality, trigger) VALUES (?, ?, ?, ?, ?)",
+                (int(person_id), person_valence, person_arousal, engagement_quality, user_text[:200]),
+            )
+            conn.commit()
+        except Exception as exc:
+            log.warning("person_affect_log_failed", error=str(exc))
+
+        # Save rolling exchange register for qualitative time gap note
+        try:
+            from chloe.state.kv import set as kv_set
+            kv_set("chat:last_exchange_register", {
+                "person_valence": person_valence,
+                "ambiguity": float(data.get("ambiguity", 0.2)),
+                "engagement_quality": engagement_quality,
+            })
+        except Exception:
+            pass
+
+        # Accumulate depletion from emotionally intensive exchanges
+        try:
+            from chloe.affect.dims import load as load_affect, save as save_affect
+            state = load_affect()
+            intensity_contribution = abs(person_arousal - 0.4) * 0.1 + float(data.get("salience", 0.3)) * 0.04
+            state.depletion = min(1.0, state.depletion + intensity_contribution)
+            save_affect(state)
+        except Exception:
+            pass
+
     except Exception as exc:
         log.warning("mention_extraction_failed", error=str(exc))
+
+
+def _worth_witnessing(exchange: str, salience: float, ambiguity: float) -> bool:
+    if len(exchange) < 150:
+        return False
+    if salience < 0.3 and ambiguity < 0.3:
+        return False
+    return True
+
+
+async def _witness_pass(user_text: str, reply: str, person_id: str) -> None:
+    """Background task: write a prose observation about this exchange if it's worth noticing."""
+    try:
+        from chloe.llm.gemini import GeminiClient
+        from chloe.llm.schemas import WitnessOutput
+        from chloe.memory.narrative_store import add_entry, query
+
+        exchange = f"[Teo]: {user_text[:500]}\n[Chloe]: {reply[:500]}"
+
+        # Salience gate — skip short or low-signal exchanges
+        salience = 0.4  # default; reuse value from extract_and_process if possible
+        ambiguity = 0.3
+        if not _worth_witnessing(exchange, salience, ambiguity):
+            return
+
+        # Semantic deduplication — skip if a very similar observation exists recently
+        similar = query(exchange, n=1)
+        if similar and _text_similarity(similar[0], exchange) > 0.7:
+            log.debug("witness_skipped_duplicate")
+            return
+
+        client = GeminiClient()
+        result = await client.flash("witness.md", {"exchange": exchange}, WitnessOutput)
+        if not result:
+            return
+
+        observation = (result.get("observation") if isinstance(result, dict)
+                       else getattr(result, "observation", "")) or ""
+        observation = observation.strip()
+        if not observation:
+            return
+
+        entry_id = add_entry(observation, source="witness", salience=0.6)
+        log.info("witness_entry_written", entry_id=entry_id, chars=len(observation))
+    except Exception as exc:
+        log.warning("witness_pass_failed", error=str(exc))
+
+
+def _text_similarity(a: str, b: str) -> float:
+    """Quick Jaccard similarity on word sets for dedup check."""
+    wa = set(a.lower().split())
+    wb = set(b.lower().split())
+    if not wa or not wb:
+        return 0.0
+    return len(wa & wb) / len(wa | wb)
 
 
 async def _maybe_resolve_pending_confirm(user_text: str, person_id: str) -> None:
@@ -367,6 +461,51 @@ async def _run_intercept(user_text: str, person_id: str) -> None:
         await run_intercept(user_text, person_id)
     except Exception as exc:
         log.warning("intercept_task_failed", error=str(exc))
+
+
+def _estimate_engagement_quality(user_text: str, chloe_reply: str) -> float:
+    """Heuristic: estimate how present/engaged Teo seems from his message.
+
+    Returns 0.0–1.0. Short messages with no referential pickup score low;
+    longer messages that pick up prior thread score high.
+    """
+    words = user_text.split()
+    word_count = len(words)
+
+    score = 0.5  # baseline
+    if word_count < 5:
+        score -= 0.25
+    elif word_count > 40:
+        score += 0.2
+    elif word_count > 15:
+        score += 0.1
+
+    # Bonus when message references content from Chloe's prior reply
+    if chloe_reply:
+        reply_words = set(chloe_reply.lower().split())
+        user_words = set(w.lower() for w in words)
+        overlap = len(user_words & reply_words) / max(len(user_words), 1)
+        if overlap > 0.15:
+            score += 0.2
+
+    # Signs of engagement: questions, exclamations, named things
+    if "?" in user_text:
+        score += 0.05
+    if "!" in user_text:
+        score += 0.05
+
+    return max(0.0, min(1.0, score))
+
+
+def _save_conversation_end_register() -> None:
+    """Copy the last exchange register to last_session_register when a conversation closes."""
+    try:
+        from chloe.state.kv import get as kv_get, set as kv_set
+        reg = kv_get("chat:last_exchange_register") or {}
+        if reg:
+            kv_set("chat:last_session_register", reg)
+    except Exception:
+        pass
 
 
 async def _post_chat_reflect() -> None:

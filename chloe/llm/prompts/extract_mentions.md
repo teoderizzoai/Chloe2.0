@@ -30,6 +30,13 @@ Only include if there's an actual aesthetic moment — not for generic conversat
 - **salience**: float 0..1 — how emotionally significant or memorable this exchange is (0.3 = routine chat, 0.7+ = genuinely moved or disturbed)
 - **ambiguity**: float 0..1 — how unresolved or hard to interpret the exchange is (0.2 = clear, 0.7+ = something happened that isn't fully legible yet)
 
+### 4. Teo's apparent emotional state
+Read the user's messages and estimate:
+- **person_valence**: float -1..1 — his emotional tone (-1=very negative/distressed, 0=neutral, 1=positive/warm)
+- **person_arousal**: float 0..1 — his energy/engagement level (0=flat/withdrawn, 0.4=normal, 1=very energised)
+
+Base this only on what's observable in the text. Default to 0.0 and 0.4 if the exchange is too short or ambiguous to read.
+
 ## Output
 
 ```json
@@ -37,7 +44,9 @@ Only include if there's an actual aesthetic moment — not for generic conversat
   "social_mentions": [ { "name": "...", "content": "...", "emotional_valence": 0.0, "confidentiality": "relational" } ],
   "aesthetic_reactions": [ { "stimulus": "...", "domain": "music", "valence": 0.5, "intensity": 0.6, "notes": "" } ],
   "salience": 0.3,
-  "ambiguity": 0.2
+  "ambiguity": 0.2,
+  "person_valence": 0.0,
+  "person_arousal": 0.4
 }
 ```
 

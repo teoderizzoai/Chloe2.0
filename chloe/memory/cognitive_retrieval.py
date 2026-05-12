@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from chloe.memory.retrieval import query_mixed, Memory
+from chloe.memory.retrieval import query_fast, Memory
 from chloe.observability.logging import get_logger
 from chloe.state.db import get_connection
 
@@ -66,8 +66,15 @@ def retrieve(intent: str, top_k: int = 20) -> CognitiveResult:
 
 
 def _fetch_memories(intent: str, top_k: int) -> list[Memory]:
-    mix = {"episodic": 12, "semantic": 4, "autobiographical": 2, "procedural": 2}
-    return query_mixed(intent, mix)
+    caps = {"episodic": 12, "semantic": 4, "autobiographical": 2, "procedural": 2}
+    candidates = query_fast(intent, n=40)
+    counts: dict[str, int] = {}
+    results: list[Memory] = []
+    for m in candidates:
+        if counts.get(m.kind, 0) < caps.get(m.kind, 2):
+            results.append(m)
+            counts[m.kind] = counts.get(m.kind, 0) + 1
+    return results
 
 
 def _fetch_person_context() -> list[PersonContext]:
