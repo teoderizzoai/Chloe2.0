@@ -164,44 +164,234 @@ async def _rebuild_chroma_async(dry_run: bool, batch_size: int, tiers: list[str]
 
 @app.command("bootstrap-identity")
 def bootstrap_identity(
-    person_id: int = typer.Option(1, "--person-id", help="Person ID to bootstrap addendum for"),
+    person_id: int = typer.Option(1, "--person-id", help="Person ID to generate addendum for"),
+    skip_self_model: bool = typer.Option(False, "--skip-self-model", help="Skip weekly self-model (~$0.08 Pro Thinking call)"),
+    skip_onboarding: bool = typer.Option(False, "--skip-onboarding", help="Skip onboarding re-extraction"),
 ):
-    """Bootstrap the character addendum and first narrative timeline entry for a person.
+    """Exhaustive identity bootstrap — runs the full weekly pipeline from scratch.
 
-    Safe to run on a live DB. Makes one Flash call (addendum) and one Opus call
-    (narrative weaver). Run once manually after seeding the DB with real history.
+    Phase order:
+      1. Onboarding re-extraction  (Flash: inner_aversions, inner_questions, trait_profile, teo_read)
+      2. Trait adjudication        (Flash: review evidence, apply weight updates + stale decay)
+      3. Weekly self-model         (Pro Thinking: first self-belief + week intention)
+      4. Narrative consolidation   (Flash: compress witness entries if ≥5 exist)
+      5. Narrative weaver          (Pro Thinking: NarrativeEntry + character addendum if overdue)
+      6. Signal extraction         (Flash: narrative → world_beliefs, interest promotions, tensions)
+      7. Curiosity question drain  (Flash: generate questions for interests above threshold)
+      8. Aesthetic patterns        (Flash: only if ≥10 reactions exist)
+
+    Safe to re-run on a live DB. Requires GEMINI_API_KEY.
     """
-    asyncio.run(_bootstrap_identity_async(person_id))
+    asyncio.run(_bootstrap_identity_async(person_id, skip_self_model=skip_self_model, skip_onboarding=skip_onboarding))
 
 
-async def _bootstrap_identity_async(person_id: int) -> None:
+async def _bootstrap_identity_async(
+    person_id: int,
+    skip_self_model: bool = False,
+    skip_onboarding: bool = False,
+) -> None:
     import rich
-    from chloe.state.db import migrate, seed_primary_persons
+    from chloe.state.db import migrate, seed_primary_persons, get_connection
 
     migrate()
     seed_primary_persons()
 
-    rich.print(f"[bold]Bootstrapping identity for person_id={person_id}[/bold]")
+    rich.print(f"\n[bold]Bootstrap identity[/bold] — person_id={person_id}")
+    rich.print("[dim]Running full weekly pipeline. Requires GEMINI_API_KEY.[/dim]")
 
+    results: dict = {}
+
+    def section(label: str) -> None:
+        rich.print(f"\n[bold cyan]── {label} ──[/bold cyan]")
+
+    # ── 1: Onboarding re-extraction ───────────────────────────────────────────
+    section("1/8  Onboarding re-extraction")
+    if skip_onboarding:
+        rich.print("[dim]skipped (--skip-onboarding)[/dim]")
+        results["onboarding"] = {"skipped": True}
+    else:
+        try:
+            conn = get_connection()
+            rows = conn.execute(
+                "SELECT text FROM memories WHERE source='onboarding' ORDER BY id ASC"
+            ).fetchall()
+            if not rows:
+                rich.print("[yellow]No onboarding memories — skipping[/yellow]")
+                results["onboarding"] = {"skipped": True, "reason": "no_onboarding_memories"}
+            else:
+                from chloe.identity.onboarding import run_extraction
+                qa_text = "\n\n".join(
+                    r["text"].replace("Teo told me: ", "A: ") for r in rows
+                )
+                r = await run_extraction(qa_text, conn)
+                if r.get("extraction") == "failed":
+                    rich.print("[yellow]Extraction returned nothing (no API key?)[/yellow]")
+                else:
+                    n_knowledge = r.get("knowledge_statements", 0)
+                    n_people = len(r.get("people_found") or [])
+                    n_created = len(r.get("people_created") or [])
+                    n_aversions = len(r.get("aversions") or [])
+                    n_threads = len(r.get("open_threads") or [])
+                    rich.print(
+                        f"[green]knowledge={n_knowledge}, people={n_people} ({n_created} new),"
+                        f" aversions={n_aversions}, threads={n_threads}[/green]"
+                    )
+                results["onboarding"] = r
+        except Exception as exc:
+            rich.print(f"[red]Onboarding re-extraction failed: {exc}[/red]")
+            results["onboarding"] = {"error": str(exc)}
+
+    # ── 2: Trait adjudication ─────────────────────────────────────────────────
+    section("2/8  Trait adjudication")
     try:
-        from chloe.identity.character_addendum import update_addendum
-        result = await update_addendum(person_id=person_id)
-        if result:
-            rich.print(f"[green]Addendum written ({len(result)} chars)[/green]")
+        from chloe.reflect.weekly import run_trait_adjudication
+        r = await run_trait_adjudication()
+        if r.get("skipped"):
+            rich.print("[yellow]Skipped (no recent evidence)[/yellow]")
         else:
-            rich.print("[yellow]Addendum: LLM returned nothing (no API key?)[/yellow]")
+            rich.print(
+                f"[green]weight_updates={r.get('weight_updates', 0)},"
+                f" new_patterns={r.get('new_patterns', 0)}[/green]"
+            )
+        results["trait_adjudication"] = r
     except Exception as exc:
-        rich.print(f"[red]Addendum failed: {exc}[/red]")
+        rich.print(f"[red]Trait adjudication failed: {exc}[/red]")
+        results["trait_adjudication"] = {"error": str(exc)}
 
+    # ── 3: Weekly self-model ──────────────────────────────────────────────────
+    section("3/8  Weekly self-model (Pro Thinking)")
+    if skip_self_model:
+        rich.print("[dim]Skipped (--skip-self-model)[/dim]")
+        results["self_model"] = {"skipped": True}
+    else:
+        try:
+            from chloe.identity.self_model import run_weekly_self_model
+            r = await run_weekly_self_model()
+            if r:
+                rich.print(f"[green]belief_id={r['belief_id']}, goal_id={r['goal_id']}[/green]")
+            else:
+                rich.print("[yellow]No result (no API key?)[/yellow]")
+            results["self_model"] = r or {"error": "no_result"}
+        except Exception as exc:
+            rich.print(f"[red]Self-model failed: {exc}[/red]")
+            results["self_model"] = {"error": str(exc)}
+
+    # ── 4: Narrative consolidation ────────────────────────────────────────────
+    section("4/8  Narrative consolidation")
+    try:
+        from chloe.reflect.weekly import run_narrative_consolidation
+        r = await run_narrative_consolidation()
+        if r.get("skipped"):
+            rich.print("[yellow]Skipped (fewer than 5 witness entries)[/yellow]")
+        else:
+            rich.print(
+                f"[green]consolidated_id={r.get('consolidated_id')},"
+                f" archived={r.get('archived')} entries[/green]"
+            )
+        results["narrative_consolidation"] = r
+    except Exception as exc:
+        rich.print(f"[red]Narrative consolidation failed: {exc}[/red]")
+        results["narrative_consolidation"] = {"error": str(exc)}
+
+    # ── 5: Narrative weaver + character addendum ──────────────────────────────
+    section("5/8  Narrative weaver (Pro Thinking) + character addendum")
     try:
         from chloe.identity.narrative_weaver import weave_narrative
-        out = await weave_narrative()
-        if "error" in out:
-            rich.print(f"[yellow]Narrative: {out}[/yellow]")
+        r = await weave_narrative()
+        if "error" in r:
+            rich.print(f"[yellow]Narrative weaver: {r}[/yellow]")
         else:
-            rich.print(f"[green]Narrative entry written: \"{out.get('period_label', '?')}\"[/green]")
+            chapter_note = " [chapter transition]" if r.get("chapter_transition") else ""
+            addendum_note = " + addendum" if r.get("addendum_triggered") else ""
+            rich.print(f"[green]Entry: \"{r.get('period_label', '?')}\"{chapter_note}{addendum_note}[/green]")
+        results["narrative"] = r
     except Exception as exc:
         rich.print(f"[red]Narrative weaver failed: {exc}[/red]")
+        results["narrative"] = {"error": str(exc)}
+
+    # If addendum wasn't triggered by the weaver (e.g. it errored), generate one directly
+    if not results.get("narrative", {}).get("addendum_triggered"):
+        try:
+            from chloe.identity.character_addendum import update_addendum
+            narrative_r = results.get("narrative", {})
+            ctx = (
+                f"{narrative_r.get('period_label', '')}: "
+                f"{narrative_r.get('felt_texture', '')}".strip(": ")
+                if isinstance(narrative_r, dict) else ""
+            )
+            body = await update_addendum(person_id=person_id, narrative_context=ctx)
+            if body:
+                rich.print(f"[green]  Addendum written ({len(body)} chars)[/green]")
+            else:
+                rich.print("[yellow]  Addendum: no output (no API key?)[/yellow]")
+        except Exception as exc:
+            rich.print(f"[red]  Addendum failed: {exc}[/red]")
+
+    # ── 6: Signal extraction ──────────────────────────────────────────────────
+    section("6/8  Signal extraction")
+    try:
+        from chloe.reflect.weekly import run_signal_extraction
+        r = await run_signal_extraction()
+        if r.get("skipped"):
+            rich.print("[yellow]Skipped (no narrative entries yet)[/yellow]")
+        else:
+            applied = r.get("applied", {})
+            rich.print(
+                f"[green]beliefs={applied.get('beliefs', 0)},"
+                f" promotions={applied.get('promotions', 0)},"
+                f" tensions={applied.get('tensions', 0)}[/green]"
+            )
+        results["signal_extraction"] = r
+    except Exception as exc:
+        rich.print(f"[red]Signal extraction failed: {exc}[/red]")
+        results["signal_extraction"] = {"error": str(exc)}
+
+    # ── 7: Curiosity question backlog ─────────────────────────────────────────
+    section("7/8  Curiosity question drain")
+    try:
+        from chloe.identity.interest_garden import drain_pending_curiosity_questions
+        drained = await drain_pending_curiosity_questions()
+        if drained:
+            rich.print(f"[green]Generated {drained} curiosity question(s)[/green]")
+        else:
+            rich.print("[dim]No pending questions[/dim]")
+        results["curiosity_questions"] = {"drained": drained}
+    except Exception as exc:
+        rich.print(f"[red]Curiosity drain failed: {exc}[/red]")
+        results["curiosity_questions"] = {"error": str(exc)}
+
+    # ── 8: Aesthetic patterns ─────────────────────────────────────────────────
+    section("8/8  Aesthetic patterns")
+    try:
+        from chloe.identity.aesthetics import run_pattern_review, MIN_REACTIONS_FOR_PATTERN
+        conn = get_connection()
+        count_row = conn.execute("SELECT COUNT(*) AS n FROM aesthetic_reactions").fetchone()
+        reaction_count = count_row["n"] if count_row else 0
+        if reaction_count < MIN_REACTIONS_FOR_PATTERN:
+            rich.print(f"[yellow]Only {reaction_count}/{MIN_REACTIONS_FOR_PATTERN} reactions — skipping[/yellow]")
+            results["aesthetics"] = {"skipped": True, "count": reaction_count}
+        else:
+            r = await run_pattern_review()
+            if r.get("skipped") or r.get("error"):
+                rich.print(f"[yellow]Aesthetic patterns: {r}[/yellow]")
+            else:
+                rich.print(f"[green]{r.get('patterns', 0)} patterns across {r.get('domains', [])}[/green]")
+            results["aesthetics"] = r
+    except Exception as exc:
+        rich.print(f"[red]Aesthetic patterns failed: {exc}[/red]")
+        results["aesthetics"] = {"error": str(exc)}
+
+    # ── Summary ────────────────────────────────────────────────────────────────
+    rich.print("\n[bold]Bootstrap complete.[/bold]")
+    errors = [k for k, v in results.items() if isinstance(v, dict) and "error" in v]
+    skipped = [k for k, v in results.items() if isinstance(v, dict) and v.get("skipped")]
+    ok = [k for k in results if k not in errors and k not in skipped]
+    if ok:
+        rich.print(f"  [green]ok:[/green] {', '.join(ok)}")
+    if skipped:
+        rich.print(f"  [dim]skipped:[/dim] {', '.join(skipped)}")
+    if errors:
+        rich.print(f"  [red]errors:[/red] {', '.join(errors)}")
 
 
 @app.command("simulate-day")

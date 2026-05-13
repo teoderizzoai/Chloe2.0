@@ -146,7 +146,7 @@ async def dashboard_state() -> dict:
         "SELECT id, name, aliases, relationship_class, warmth, attachment_pattern, impression, "
         "trait_profile, last_contact, created_at "
         "FROM persons WHERE is_active=1 OR is_active IS NULL "
-        "ORDER BY warmth DESC LIMIT 10"
+        "ORDER BY warmth DESC LIMIT 30"
     ).fetchall()
     persons = []
     seen_names: set[str] = set()

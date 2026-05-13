@@ -229,11 +229,12 @@ function highlight(text, query) {
 
 /* ─────────────────────── ONBOARDING FLOW ─────────────────────── */
 const ONBOARDING_QUESTIONS = [
-  { id: "work",    q: "What do you do? What are you building or working on right now?" },
-  { id: "people",  q: "Who are the important people in your life? Names and what the deal is with each." },
-  { id: "tastes",  q: "What are you into right now — music, ideas, aesthetics, anything that keeps pulling your attention?" },
-  { id: "bothers", q: "What genuinely bothers you? Things that consistently feel wrong or broken." },
-  { id: "us",      q: "How do you want this to feel — you and me?" },
+  { id: "intro",   q: "Tell me who you are. Name, where you're from, whatever feels like the basics." },
+  { id: "work",    q: "What do you do for work? What does a typical week look like?" },
+  { id: "family",  q: "Tell me about your family. Who's in it, where are they, what are they like?" },
+  { id: "friends", q: "Who are your close friends? Names and what they're like, or how you know them." },
+  { id: "pets",    q: "Any pets? Tell me about them." },
+  { id: "tastes",  q: "What are you into? Hobbies, music, things you spend time on, whatever you actually enjoy." },
 ];
 
 function OnboardingFlow({ onDone, onCancel }) {
@@ -404,7 +405,7 @@ function RelationshipsTab({ data }) {
             <div>
               <div style={{fontWeight: 600, marginBottom: 4}}>She doesn't know you yet.</div>
               <div style={{fontSize: 14, color:"var(--ink-soft)"}}>
-                Run a short onboarding — five questions. She'll remember your answers at high salience and synthesize a standing read on you.
+                Six quick questions — who you are, family, friends, job, pets, interests. A starting point so she knows you.
               </div>
             </div>
             <button className="primary" style={{flexShrink: 0, marginLeft: 20}} onClick={() => setShowOnboarding(true)}>
