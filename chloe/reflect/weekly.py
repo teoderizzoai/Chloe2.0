@@ -343,6 +343,19 @@ async def run_teo_read_synthesis() -> dict:
         return {"skipped": True, "reason": "empty_output"}
 
     kv_set("identity:teo_read", observation)
+
+    # Keep persons.impression in sync so the dashboard reflects the latest read
+    try:
+        from chloe.state.db import get_connection
+        conn = get_connection()
+        conn.execute(
+            "UPDATE persons SET impression=? WHERE id=1",
+            (observation[:500],),
+        )
+        conn.commit()
+    except Exception as exc:
+        log.warning("teo_read_impression_sync_failed", error=str(exc))
+
     log.info("teo_read_synthesis_done", chars=len(observation))
     return {"chars": len(observation)}
 
