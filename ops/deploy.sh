@@ -21,4 +21,4 @@ cd ..
 echo "[deploy] Restarting service..."
 systemctl restart chloe
 
-echo "[deploy] Done."
+echo "[deploy] Done. $(date -u '+%Y-%m-%d %H:%M UTC')"
