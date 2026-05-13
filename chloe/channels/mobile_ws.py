@@ -38,7 +38,16 @@ async def handle_mobile_ws(websocket: Any, person_id: str = "1") -> None:
     from google.genai import types as genai_types
 
     client = genai.Client(api_key=api_key)
-    history: list[dict] = []
+    history: list[dict] = _load_history_from_db(person_id)
+
+    # Send history to client so the UI can render prior messages on connect
+    if history:
+        ui_msgs = []
+        for h in history:
+            role = h.get("role", "")
+            text = (h.get("parts") or [{}])[0].get("text", "")
+            ui_msgs.append({"from": "chloe" if role == "model" else "me", "text": text})
+        await websocket.send_text(json.dumps({"type": "history", "messages": ui_msgs}))
 
     # Per-session preflight slot cache — avoids re-resolving the same person
     # or belief slot on consecutive turns. Cleared automatically when the WS closes.
@@ -189,6 +198,17 @@ async def _chat_reply_streaming(
             system_prompt = f"{char_prefix}\n\n{preflight_context}\n\n{dynamic_suffix}"
         else:
             system_prompt = f"{char_prefix}\n\n{dynamic_suffix}"
+
+        # Cache for debug tab
+        try:
+            from chloe.state.kv import set as _kv_set
+            from datetime import datetime as _dt, timezone as _tz
+            _kv_set("debug:last_system_prompt", system_prompt)
+            _kv_set("debug:last_dynamic_suffix", dynamic_suffix)
+            _kv_set("debug:last_preflight_context", preflight_context or "")
+            _kv_set("debug:last_turn_at", _dt.now(_tz.utc).isoformat())
+        except Exception:
+            pass
 
         registry = get_registry()
         tool_decls = registry.gemini_tool_declarations()
@@ -631,18 +651,24 @@ async def _handle_reaction(msg: dict, person_id: str) -> None:
         log.warning("handle_reaction_failed", error=str(exc))
 
 
-def _persist_chat_turn(role: str, text: str, person_id: str) -> None:
-    """Write a chat turn as a low-salience episodic memory.
+def _person_name(person_id: str) -> str:
+    try:
+        from chloe.state.db import get_connection
+        conn = get_connection()
+        row = conn.execute("SELECT name FROM persons WHERE id=?", (int(person_id),)).fetchone()
+        return row["name"] if row else "them"
+    except Exception:
+        return "them"
 
-    Salience is intentionally low (0.3) so chat fragments don't dominate
-    retrieval, but they remain available for grading and for nightly
-    consolidation to extract semantic facts from.
-    """
+
+def _persist_chat_turn(role: str, text: str, person_id: str) -> None:
+    """Write a chat turn as a low-salience episodic memory."""
     try:
         from chloe.state.db import get_connection
         conn = get_connection()
         snippet = text if len(text) <= 1000 else text[:1000] + "…"
-        prefix = "Teo said" if role == "user" else "I said"
+        name = _person_name(person_id) if role == "user" else None
+        prefix = f"{name} said" if name else "I said"
         body = f"{prefix}: {snippet}"
         conn.execute(
             """
@@ -654,6 +680,35 @@ def _persist_chat_turn(role: str, text: str, person_id: str) -> None:
         conn.commit()
     except Exception as exc:
         log.warning("chat_persist_failed", error=str(exc))
+
+
+def _load_history_from_db(person_id: str, limit: int = _MAX_HISTORY * 2) -> list[dict]:
+    """Restore recent chat turns from memories table for Gemini context."""
+    try:
+        from chloe.state.db import get_connection
+        conn = get_connection()
+        rows = conn.execute(
+            """SELECT text FROM memories
+               WHERE source='chat' AND source_ref=?
+               ORDER BY created_at ASC""",
+            (f"chat:{person_id}",),
+        ).fetchall()
+        # Keep only the most recent `limit` turns
+        rows = rows[-limit:]
+        history = []
+        for row in rows:
+            text = row["text"] or ""
+            if text.startswith("I said: "):
+                history.append({"role": "model", "parts": [{"text": text[8:]}]})
+            else:
+                # "{Name} said: {text}" — strip the prefix
+                colon = text.find(": ")
+                body = text[colon + 2:] if colon != -1 else text
+                history.append({"role": "user", "parts": [{"text": body}]})
+        return history
+    except Exception as exc:
+        log.warning("history_load_failed", error=str(exc))
+        return []
 
 
 # Heavy introspective blocks skipped for routine (low-salience) messages.

@@ -77,6 +77,9 @@ class NotesTool(Tool):
 
     def _safe_path(self, rel: str) -> Path:
         self._root.mkdir(parents=True, exist_ok=True)
+        # Strip leading slash — the model sometimes passes "/people/foo" thinking
+        # the notes root is the filesystem root, which causes Path to discard root.
+        rel = rel.lstrip("/")
         resolved = (self._root / rel).resolve()
         if not str(resolved).startswith(str(self._root.resolve())):
             raise PermissionError(f"Path traversal rejected: {rel!r}")

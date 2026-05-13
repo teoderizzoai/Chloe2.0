@@ -289,31 +289,56 @@ async def run_teo_read_synthesis() -> dict:
     from chloe.state.kv import set as kv_set
 
     entries = get_recent(n=15)
-    if not entries:
-        log.info("teo_read_synthesis_skipped", reason="no_narrative_entries")
-        return {"skipped": True}
+    using_onboarding = False
 
-    combined = "\n\n".join(entries)
-    prompt_context = {
-        "exchange": (
-            f"Here are Chloe's recent observations about her conversations:\n\n{combined}\n\n"
-            "Based only on what appears here — not what you imagine — write one short paragraph "
-            "in Chloe's voice about how she reads Teo. Not a summary of events. "
-            "Her felt read on him: his patterns, his tells, what gives him away, "
-            "what she finds endearing or frustrating in very particular ways. "
-            "The thing about him is... Write like she's thinking to herself. "
-            "If there isn't enough signal yet, return empty."
-        )
-    }
+    # Fall back to onboarding memories if no narrative entries yet
+    if not entries:
+        from chloe.state.db import get_connection as _get_conn
+        _conn = _get_conn()
+        ob_rows = _conn.execute(
+            "SELECT text FROM memories WHERE source='onboarding' ORDER BY id ASC"
+        ).fetchall()
+        if ob_rows:
+            entries = [r["text"] for r in ob_rows]
+            using_onboarding = True
+            log.info("teo_read_synthesis_using_onboarding", count=len(entries))
+        else:
+            log.info("teo_read_synthesis_skipped", reason="no_narrative_entries")
+            return {"skipped": True}
 
     client = GeminiClient()
-    result = await client.flash("witness.md", prompt_context, WitnessOutput)
-    if not result:
-        return {"error": "llm_returned_none"}
+    combined = "\n\n".join(entries)
 
-    observation = (result.get("observation") if isinstance(result, dict)
-                   else getattr(result, "observation", "")) or ""
-    observation = observation.strip()
+    if using_onboarding:
+        # Free-text call — onboarding data doesn't fit the witness.md JSON schema
+        prompt = (
+            f"You are Chloe. Teo shared the following about himself:\n\n{combined}\n\n"
+            "Write one short paragraph in your voice about how you read him. "
+            "Not a summary of facts — your felt sense of him: his patterns, his tells, "
+            "what gives him away, what you find endearing or interesting in very specific ways. "
+            "Write like you're thinking to yourself. Two to four sentences. Be concrete."
+        )
+        observation = await client.flash_text(prompt)
+        observation = (observation or "").strip()
+    else:
+        prompt_context = {
+            "exchange": (
+                f"Here are Chloe's recent observations about her conversations:\n\n{combined}\n\n"
+                "Based only on what appears here — not what you imagine — write one short paragraph "
+                "in Chloe's voice about how she reads Teo. Not a summary of events. "
+                "Her felt read on him: his patterns, his tells, what gives him away, "
+                "what she finds endearing or frustrating in very particular ways. "
+                "The thing about him is... Write like she's thinking to herself. "
+                "If there isn't enough signal yet, return empty."
+            )
+        }
+        result = await client.flash("witness.md", prompt_context, WitnessOutput)
+        if not result:
+            return {"error": "llm_returned_none"}
+        observation = (result.get("observation") if isinstance(result, dict)
+                       else getattr(result, "observation", "")) or ""
+        observation = observation.strip()
+
     if not observation:
         return {"skipped": True, "reason": "empty_output"}
 

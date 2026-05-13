@@ -2,7 +2,7 @@
 
 A complete map of Chloe's cognition: what happens when you send her a message, how she retrieves and stores memories, when she decides to act on her own, where ideas come from, and how her personality changes over time. Plus an honest assessment of what works, what doesn't, and what to fix next.
 
-**Last updated: 2026-05-12. Reflects all instruction.md steps: preflight depth (1a–1g), memory fragment metadata (2a–2d + migration 0023), LLM prompt quality (3a–3d), pipeline gaps (4a/4d), and EXPLANATION.md update. Prior update: split reflect, confidential_to writer, emotional valence writer, TTFT measurement, PII redaction, daily budget tracking, onboarding flow, voice anchor, forget_memory verb, salience gate, narrative table separation, and bootstrap run.**
+**Last updated: 2026-05-13. Reflects: emotional/personality trait split, emotion-stamped memory retrieval, interest loop fix, simulator validation, reflect prompt naivety preambles, output token budgets raised (4096), RECENT_CHAT_TURNS reduced (12), MIN_PRESSURE_TO_KEEP raised (0.10). Prior update: preflight depth (1a–1g), memory fragment metadata (2a–2d + migration 0023), LLM prompt quality (3a–3d), pipeline gaps (4a/4d). Oldest: split reflect, confidential_to writer, emotional valence writer, TTFT, PII redaction, daily budget tracking, onboarding flow, voice anchor, forget_memory verb, salience gate, narrative table separation, bootstrap run.**
 
 ---
 
@@ -298,12 +298,15 @@ Weight decays exponentially: `w * 0.5^(age_days / half_life)` — applied nightl
 
 `query_fast(rich_q, n)` is the chat hot-path function. One Chroma call, no kind partitioning.
 
-After the Chroma result, three scoring adjustments are applied **in Python with no additional embedding calls**:
+After the Chroma result, four scoring adjustments are applied **in Python with no additional embedding calls**:
 1. **Anchor bonus** (+0.05) if the memory has a live `artifact_ref`.
 2. **Inside-joke bonus** (+0.12) if the query overlaps a `joke_topic:<x>` tag.
-3. **Affect-resonance bonus** (up to +0.08) if `emotional_valence` aligns with Chloe's current affect: `alignment = 1 - |memory_valence - current_valence|; bonus = 0.08 × alignment`. This is mood-congruent recall — low-valence states surface heavier memories.
+3. **Affect-resonance bonus** (up to +0.08) if `emotional_valence` aligns with Chloe's current affect: `alignment = 1 - |memory_valence - current_valence|; bonus = 0.08 × alignment`. Mood-congruent recall — low-valence states surface heavier memories.
+4. **Emotion-label bonus** (up to +0.10) if any of the memory's `emotional_labels` overlap with `kv:reflect:current_emotions`. State-dependent recall — a memory formed while Curious surfaces more readily when Chloe is currently Curious. Max 0.06 per matching label, capped at 0.10.
 
-**Compound score** = `cosine × salience × recency_decay + affect_bonus + reference_bonus`
+`emotional_labels` are a list of named emotion words (from the approved emotional vocabulary) stored in Chroma metadata when a memory is written. They are auto-stamped from KV: every `memory.store.add()` call reads `kv:reflect:current_emotions` and writes the current emotional state into Chroma metadata. No extra embedding calls needed.
+
+**Compound score** = `cosine × salience × recency_decay + affect_bonus + emotion_label_bonus + reference_bonus`
 
 Where `recency_decay = exp(-days_old / 30)`. All factors computed from Chroma metadata without extra SQLite round-trips.
 
@@ -343,7 +346,14 @@ One update: **kinetic-sensitive verbs from chat no longer produce a hard error.*
 
 ## 5. The Initiative Engine — Where Autonomous Behavior Comes From
 
-*(Same architecture as prior description — six candidate sources, scoring formula, gate submission. See prior document for full detail.)*
+*(Same architecture as prior description — six candidate sources, scoring formula, gate submission.)*
+
+**Interest loop fix (2026-05-13):** When an interest-driven action is held back by deliberation or leash, the same interest candidate would win every subsequent tick (deliberation kept aborting it, flooding the memories table with held-back entries). Fixed in two places:
+
+- `engine.py` `finally` block now calls `_mark_interest_attempted(source_id)` for `source == "interest"` — stamps `last_engaged_at = now` whether the action was executed, held back, or failed.
+- `candidates.py._load_interests()` filters out interests where `last_engaged_at < 2 hours ago`. A cooled-down interest can't win again immediately.
+
+This applies to all interest outcomes — successful execution stamps the cooldown too, naturally preventing rapid re-firing of the same exploration.
 
 ---
 
@@ -370,17 +380,20 @@ Rather than a single 12-field monolith, the full reflect fires two Flash calls c
 - `biased_summary` — **persisted to `kv:reflect:biased_summary`, injected into chat**
 - `new_anticipations` — new `inner_anticipations` rows (dreads / things she's looking forward to)
 - `new_questions` — new `inner_questions` rows (open epistemic middle state)
+- `current_emotions` — **0–3 named emotional states from the approved emotional vocabulary (Worried, Curious, Calm, etc.). Temporary — replaced every window. Persisted to `kv:reflect:current_emotions`. Stamps all subsequent memories in Chroma metadata. Drives state-dependent retrieval bonus.**
 
 **Call B — `reflect_signals.md` → `ReflectDevelopmental`** (developmental / identity):
 - `new_interests` — emerging curiosity threads (conservative: must be distinct and grounded)
 - `new_goals` — long-running pursuits
 - `goal_progress_updates` — progress deltas on existing goals
 - `new_world_beliefs` — up to 1, must be grounded in lived encounter
-- `trait_evidence` — behavioral observations for trait adjudication
+- `trait_evidence` — behavioral observations for personality trait adjudication only (not emotional states — those go in `current_emotions` above)
 
 Both calls run simultaneously. Results are merged into a unified `ReflectOutput` dict before `_apply_output()` processes them. Benefit: JSON dropout in one call doesn't silence the other; current-state latency is not blocked by developmental reasoning.
 
 `novelty_deficit` update — rises 0.05 per novel content seen; falls 0.1 per new belief/question/interest formed.
+
+**Pressure dynamics (2026-05-13):** `MIN_PRESSURE_TO_KEEP` raised from 0.05 → **0.10**. Ghost wants (dropped below threshold but not actually addressed) were surviving at 0.06 pressure indefinitely. At 0.10, items genuinely decay out rather than lingering.
 
 ### Every night ~03:00 — `reflect/nightly.py`
 
@@ -411,7 +424,26 @@ Seven passes in order:
 
 ### Interests, Traits, Persons
 
-*(Same as prior description — gen_level gates, fuzzy dedup, curiosity-question caching, promotion via narrative weaver, trait evidence accumulation, person attachment_depth.)*
+*(Same architecture — gen_level gates, fuzzy dedup, curiosity-question caching, promotion via narrative weaver, person attachment_depth.)*
+
+**Personality traits vs. emotional states (2026-05-13):**
+
+Traits and emotional states are now completely separate systems:
+
+**Personality traits** (`identity_traits` table, `reflect_signals.md` → `trait_evidence`):
+- Stable character patterns that hold across many situations and build over time
+- Must be one word from the approved **Personality Trait Vocabulary** (Curious, Caring, Inquisitive, Reflective, Observant, etc.)
+- Gen-level gates: 10+ evidence instances across 3+ windows before promoting to gen_level=1
+- Python safety net: `_snap_to_approved_trait()` maps variants (cutoff=0.7) or rejects emotional words entirely
+
+**Emotional state** (`kv:reflect:current_emotions`, `reflect_inner_state.md` → `current_emotions`):
+- Temporary named emotions (Worried, Anxious, Curious-as-mood, Excited, etc.)
+- Replaced every 2h reflect window — not accumulated, not gated
+- 0–3 words from the approved **Emotional Vocabulary**
+- Stored in KV; auto-stamps all memories written after the reflect window
+- Drives the emotion-label retrieval bonus (§3)
+
+`_snap_to_approved_trait()` enforces the boundary: emotional words (Anxious, Empathetic, Worried, etc.) are in `_EMOTIONAL_WORDS` blacklist and return `""` — `record_trait_evidence()` silently drops them. A mis-labelled LLM output cannot pollute the trait model with emotional state.
 
 ### World beliefs — new: ambivalent pairs
 
@@ -501,6 +533,11 @@ This is a critical category — features that exist in the DB and code but don't
 | Reply reactions for active learning | ✅ wired — `reply_reactions` table, WS `{type: "reaction"}` handler, weekly distillation |
 | Canonical tag taxonomy in preflight prompt | ✅ wired — documented in `preflight.md`, extraction prompts updated |
 | Session summary for long sessions | ✅ wired — kv-cached Flash call for sessions > 12 turns, prepended to history |
+| `current_emotions` captured from reflect | ✅ wired — `reflect_inner_state.md` → `ReflectCurrentState.current_emotions` → `kv:reflect:current_emotions` |
+| Emotional state stamps on memories | ✅ wired — every `memory.store.add()` auto-reads KV and stores `emotional_labels` in Chroma metadata |
+| Emotion-label retrieval bonus | ✅ wired — `_apply_emotion_label_bonus()` in `query_fast()`, max +0.10 per label overlap |
+| Personality/emotional trait separation | ✅ wired — `_EMOTIONAL_WORDS` blacklist in `trait_model.py`; emotional words rejected at snap, never enter `identity_traits` |
+| Interest 2h cooldown after attempt | ✅ wired — `_mark_interest_attempted()` in engine `finally` block; `_load_interests()` filters by `last_engaged_at` |
 
 ---
 
@@ -572,7 +609,15 @@ This is a critical category — features that exist in the DB and code but don't
 
 20. **Preflight depth improvements.** All seven 1a–1g items wired: timeout fallback notes prevent hallucination; per-session slot cache eliminates redundant resolves; capture dedup (cosine > 0.92, 7-day window) prevents duplicate facts; person disambiguation picks highest attachment_depth when names are ambiguous; long sessions (> 12 turns) prepend a kv-cached Flash summary; `felt_orientation` gives the main Flash call an emotional anchor; tool catalog cached at module level and invalidated on `load_dynamic_verbs`.
 
-21. **LLM prompt quality improvements.** Token budgets wired per-prompt via `max_output_tokens` in `flash()` (witness=300, extract_mentions=400, reflect passes=600, preflight=800). `AestheticReaction` schema now has `confidentiality` field, wired through to `aesthetic_reactions.confidentiality` DB column. Bad/good example pairs added to `reflect_inner_state.md`, `reflect_signals.md`, and `extract_mentions.md`. Template variables in `extract_signals.md` normalized from `{{ var }}` to `{{var}}`. Canonical tag taxonomy documented in `preflight.md`.
+21. **LLM prompt quality improvements.** Token budgets wired per-prompt via `max_output_tokens` in `flash()` (witness=300, extract_mentions=400, reflect passes=**4096**, preflight=800). `AestheticReaction` schema now has `confidentiality` field, wired through to `aesthetic_reactions.confidentiality` DB column. Bad/good example pairs added to `reflect_inner_state.md`, `reflect_signals.md`, and `extract_mentions.md`. Template variables in `extract_signals.md` normalized from `{{ var }}` to `{{var}}`. Canonical tag taxonomy documented in `preflight.md`.
+
+22. **Emotional/personality trait split.** Personality traits (stable, gen-level gated, approved vocabulary) live in `identity_traits` via `trait_evidence`. Emotional states (temporary, window-scoped, approved vocabulary) captured as `current_emotions` in `reflect_inner_state`. Python blacklist prevents emotional words from entering the trait model. Trait snap cutoff raised to 0.7 to prevent mis-mapping (e.g. "Empathetic" → "Authentic" was a regression caught in simulation).
+
+23. **Emotion-stamped memory retrieval.** Every memory written after a reflect pass is auto-stamped with Chloe's current emotional state in Chroma metadata (`emotional_labels`). The retrieval bonus `_apply_emotion_label_bonus()` gives ≤0.10 score bonus when a memory's labels overlap with current state. State-dependent recall: a memory formed while Curious surfaces more readily when Chloe is currently Curious.
+
+24. **Interest cooldown loop fix.** Interest-driven actions that are held back (deliberation abort, leash violation) now stamp `last_engaged_at` on the interest. Candidate query filters out interests engaged within the last 2 hours. Prevents the same interest from winning every tick when deliberation repeatedly rejects it.
+
+25. **Simulator validation.** 72h simulation confirmed core loop: chat → reflect → wants/tensions/interests/beliefs → initiative candidates. Reflect circuit breaker (3 consecutive failures → skip one window), JSONDecodeError logging with raw snippet, and one-retry-on-API-error all wired. `RECENT_CHAT_TURNS` reduced 30 → **12** to reduce input context size.
 
 ### Subtler things that are right
 
@@ -901,5 +946,11 @@ Chloe 2.0 is a substantially more complete agent than the version described in t
 - **Two clean narrative tables** — `narrative_events` (event logger) and `narrative_timeline` (weaver's autobiography) are now separate with their own schemas and migrations.
 
 The **preflight** (§15) is now fully implemented: a pre-generation Flash call with conversation history that routes to targeted data sources (person records, inbox, calendar, inner state, custom memory queries), captures facts to memory (with confidentiality) before the reply, and detects verb gaps. The system has both ambient context assembly and targeted structured lookup running in parallel before every reply.
+
+**New in this session (2026-05-13):**
+- Emotional and personality traits are now fully separate systems. Moods are window-scoped and temporary; character traits are slow and earned.
+- Every memory carries an emotional fingerprint. State-dependent recall means memories from similar emotional moments surface more readily — a qualitatively different kind of memory coherence.
+- The interest loop bug is fixed. A held-back action no longer floods the DB with identical attempts.
+- Simulator validated the full 72h loop end-to-end including the reflect circuit breaker and new prompt naivety constraints.
 
 The two things that make Chloe worth building — the developmental-stage discipline ("nothing is earned until it is earned") and the closed feedback loop ("reflection updates state, state shapes context, context shapes behavior") — are both intact and running deeper than before. Every feature that was coded is now connected.

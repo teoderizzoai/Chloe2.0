@@ -35,6 +35,7 @@ def add(
     emotional_valence: float | None = None,
     emotional_arousal: float | None = None,
     confidential_to: int | None = None,
+    emotional_labels: list[str] | None = None,
 ) -> int:
     """Insert into SQLite and ChromaDB. Returns the new memory id.
 
@@ -81,6 +82,14 @@ def add(
     conn.commit()
     memory_id = cursor.lastrowid
     chloe_memory_writes_total.labels(kind=kind).inc()
+    # Auto-stamp with current emotional state if caller didn't supply labels
+    if emotional_labels is None:
+        try:
+            from chloe.state.kv import get as kv_get_labels
+            emotional_labels = kv_get_labels("reflect:current_emotions") or []
+        except Exception:
+            emotional_labels = []
+
     add_to_chroma(
         memory_id=memory_id,
         text=text,
@@ -90,6 +99,7 @@ def add(
         collection_name=collection_name,
         emotional_valence=emotional_valence,
         emotional_arousal=emotional_arousal,
+        emotional_labels=emotional_labels,
     )
     return memory_id
 

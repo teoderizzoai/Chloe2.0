@@ -487,6 +487,8 @@ async def simulate_day(
 
         last_pressure = start
         last_reflect = start - timedelta(hours=3)
+        _reflect_consecutive_failures = 0
+        _REFLECT_CIRCUIT_THRESHOLD = 3
 
         # Personality tracking: snapshot at each calendar midnight.
         from chloe.sim.personality import take_snapshot, generate_character_note, print_personality_log, detect_escalation
@@ -556,21 +558,30 @@ async def simulate_day(
             reflect_summary = ""
             if (cur - last_reflect) >= timedelta(hours=2):
                 from chloe.reflect.every_2h import run_reflect
-                try:
-                    out = await run_reflect(force=True)
-                    if out:
-                        result.reflect_runs += 1
-                        a = out.get("applied", {})
-                        reflect_summary = (
-                            f" reflect[w+{a.get('wants',0)} t+{a.get('tensions',0)} "
-                            f"i+{a.get('interests',0)} g+{a.get('goals',0)}]"
-                        )
-                    else:
+                if _reflect_consecutive_failures >= _REFLECT_CIRCUIT_THRESHOLD:
+                    reflect_summary = " reflect[circuit_open]"
+                    if print_each_step:
+                        print(f"[sim] reflect_circuit_open: {_reflect_consecutive_failures} consecutive failures, skipping")
+                    _reflect_consecutive_failures = 0  # reset after one skip
+                else:
+                    try:
+                        out = await run_reflect(force=True)
+                        if out:
+                            result.reflect_runs += 1
+                            _reflect_consecutive_failures = 0
+                            a = out.get("applied", {})
+                            reflect_summary = (
+                                f" reflect[w+{a.get('wants',0)} t+{a.get('tensions',0)} "
+                                f"i+{a.get('interests',0)} g+{a.get('goals',0)}]"
+                            )
+                        else:
+                            result.reflect_failures += 1
+                            _reflect_consecutive_failures += 1
+                            reflect_summary = " reflect[skipped]"
+                    except Exception as exc:
                         result.reflect_failures += 1
-                        reflect_summary = " reflect[skipped]"
-                except Exception as exc:
-                    result.reflect_failures += 1
-                    reflect_summary = f" reflect[err: {str(exc)[:40]}]"
+                        _reflect_consecutive_failures += 1
+                        reflect_summary = f" reflect[err: {str(exc)[:40]}]"
                 last_reflect = cur
 
             snap = _snapshot_candidates(cur)

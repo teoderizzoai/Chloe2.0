@@ -243,10 +243,12 @@ def _resolve_person(name: str) -> str:
             """SELECT id, name, relationship_class, gen_level, attachment_depth,
                       stance, impression, trait_profile
                FROM persons
-               WHERE lower(name) = lower(?) OR lower(name) LIKE lower(?)
+               WHERE lower(name) = lower(?)
+                  OR lower(name) LIKE lower(?)
+                  OR (aliases IS NOT NULL AND LOWER(aliases) LIKE ?)
                ORDER BY attachment_depth DESC
                LIMIT 3""",
-            (name, f"%{name}%"),
+            (name, f"%{name}%", f'%"{name.lower()}"%'),
         ).fetchall()
 
         if not rows:
@@ -270,6 +272,16 @@ def _resolve_person(name: str) -> str:
             lines.append(f"Impression: {row['impression']}")
         if row["trait_profile"]:
             lines.append(f"Trait profile: {row['trait_profile']}")
+
+        # Known facts from person_notes (capped to avoid token bloat)
+        note_rows = conn.execute(
+            "SELECT text FROM person_notes WHERE person_id=? ORDER BY created_at DESC LIMIT 5",
+            (pid,),
+        ).fetchall()
+        if note_rows:
+            facts = "\n".join(f"- {r['text'][:200]}" for r in note_rows if r["text"])
+            if facts:
+                lines.append(f"Known facts:\n{facts}")
 
         # Person context (cross-references) if gen_level >= 1
         ctx = format_person_context_for_prompt(pid)
@@ -530,8 +542,12 @@ def _resolve_subject_person_id(person_name: str) -> int | None:
         from chloe.state.db import get_connection
         conn = get_connection()
         row = conn.execute(
-            "SELECT id FROM persons WHERE lower(name)=lower(?) OR lower(name) LIKE lower(?) LIMIT 1",
-            (person_name, f"%{person_name}%"),
+            """SELECT id FROM persons
+               WHERE lower(name)=lower(?)
+                  OR lower(name) LIKE lower(?)
+                  OR (aliases IS NOT NULL AND LOWER(aliases) LIKE ?)
+               LIMIT 1""",
+            (person_name, f"%{person_name}%", f'%"{person_name.lower()}"%'),
         ).fetchone()
         return row["id"] if row else None
     except Exception:

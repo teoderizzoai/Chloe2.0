@@ -23,8 +23,8 @@ _DAILY_BUDGET_USD = float(os.environ.get("CHLOE_DAILY_BUDGET_USD", "5.0"))
 
 # Per-prompt output token budgets — prevent unbounded reflect/witness outputs.
 _OUTPUT_BUDGETS: dict[str, int] = {
-    "reflect_inner_state.md": 600,
-    "reflect_signals.md": 600,
+    "reflect_inner_state.md": 4096,
+    "reflect_signals.md": 4096,
     "witness.md": 300,
     "preflight.md": 800,
     "extract_mentions.md": 400,
@@ -122,34 +122,69 @@ class GeminiClient:
             log.warning("gemini_no_api_key", prompt_file=prompt_file)
             return None
 
-        try:
-            from google import genai
-            from google.genai import types as genai_types
+        import asyncio
+        import json
+        from google import genai
+        from google.genai import types as genai_types
 
-            client = genai.Client(api_key=self._api_key)
-            prompt = _render_prompt(prompt_file, context)
+        client = genai.Client(api_key=self._api_key)
+        prompt = _render_prompt(prompt_file, context)
+        budget = max_output_tokens or _OUTPUT_BUDGETS.get(prompt_file)
+        cfg_kwargs: dict = {
+            "response_mime_type": "application/json",
+            "response_schema": schema,
+        }
+        if budget:
+            cfg_kwargs["max_output_tokens"] = budget
 
-            budget = max_output_tokens or _OUTPUT_BUDGETS.get(prompt_file)
-            cfg_kwargs: dict = {
-                "response_mime_type": "application/json",
-                "response_schema": schema,
-            }
-            if budget:
-                cfg_kwargs["max_output_tokens"] = budget
+        for attempt in range(2):
+            try:
+                resp = await client.aio.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=prompt,
+                    config=genai_types.GenerateContentConfig(**cfg_kwargs),
+                )
+                _record_usage(resp, "gemini-2.5-flash", prompt_file)
+                try:
+                    return json.loads(resp.text)
+                except json.JSONDecodeError as jde:
+                    raw = (resp.text or "")[:300]
+                    log.warning("gemini_flash_json_error", prompt_file=prompt_file,
+                                attempt=attempt, error=str(jde), raw_response=raw)
+                    chloe_llm_errors_total.labels(call_type=prompt_file).inc()
+                    if attempt == 0:
+                        await asyncio.sleep(2)
+                    return None
+            except Exception as e:
+                log.warning("gemini_flash_failed", prompt_file=prompt_file,
+                            attempt=attempt, error=str(e))
+                chloe_llm_errors_total.labels(call_type=prompt_file).inc()
+                if attempt == 0:
+                    await asyncio.sleep(2)
+        return None
 
-            resp = await client.aio.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=prompt,
-                config=genai_types.GenerateContentConfig(**cfg_kwargs),
-            )
-            _record_usage(resp, "gemini-2.5-flash", prompt_file)
-            import json
-            return json.loads(resp.text)
-        except Exception as e:
-            log.warning("gemini_flash_failed", prompt_file=prompt_file, error=str(e))
-            chloe_llm_errors_total.labels(call_type=prompt_file).inc()
+    async def flash_text(self, prompt: str, max_output_tokens: int = 1600) -> str | None:
+        """Free-form Flash call — returns raw text, no schema enforcement."""
+        if not self._api_key:
             return None
-
+        import asyncio
+        from google import genai
+        from google.genai import types as genai_types
+        client = genai.Client(api_key=self._api_key)
+        for attempt in range(2):
+            try:
+                resp = await client.aio.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=prompt,
+                    config=genai_types.GenerateContentConfig(max_output_tokens=max_output_tokens),
+                )
+                _record_usage(resp, "gemini-2.5-flash", "flash_text")
+                return (resp.text or "").strip() or None
+            except Exception as e:
+                log.warning("gemini_flash_text_failed", attempt=attempt, error=str(e))
+                if attempt == 0:
+                    await asyncio.sleep(2)
+        return None
 
     async def pro_thinking(
         self,

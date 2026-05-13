@@ -2,7 +2,34 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class OnboardingPersonExtract(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    name: str = Field(max_length=80)
+    nicknames: list[str] = Field(default_factory=list,
+        description="Short forms, pet names, or informal names Teo uses for them")
+    relationship_class: str = Field(default="acquaintance", max_length=40,
+        description="friend / family / colleague / acquaintance")
+    relationship_desc: str = Field(default="", max_length=200,
+        description="What they are to Teo in one phrase")
+    notes: str = Field(default="", max_length=300,
+        description="Anything notable from what was said about them")
+
+
+class OnboardingExtraction(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    knowledge_statements: list[str] = Field(default_factory=list,
+        description="4-8 clean facts about Teo, properly phrased")
+    people: list[OnboardingPersonExtract] = Field(default_factory=list,
+        description="Named people mentioned and their relationship to Teo")
+    trait_profile: dict[str, float] = Field(default_factory=dict,
+        description="3-6 traits inferable from the answers, each 0.0-1.0")
+    aversions: list[str] = Field(default_factory=list,
+        description="Things Teo dislikes or wants to avoid, properly phrased")
+    open_threads: list[str] = Field(default_factory=list,
+        description="Things worth following up on")
 
 
 class MessageBody(BaseModel):
@@ -200,6 +227,7 @@ class ReflectOutput(BaseModel):
     biased_summary: str = Field(max_length=240, default="")
     new_anticipations: list[ReflectAnticipation] = Field(default_factory=list)
     new_questions: list[ReflectNewQuestion] = Field(default_factory=list)
+    current_emotions: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +247,8 @@ class ReflectCurrentState(BaseModel):
         description="One sentence: how her current state is coloring how she sees things.")
     new_anticipations: list[ReflectAnticipation] = Field(default_factory=list)
     new_questions: list[ReflectNewQuestion] = Field(default_factory=list)
+    current_emotions: list[str] = Field(default_factory=list,
+        description="0–3 named emotions from the approved emotional vocabulary — current mood, not character. Replaced each window.")
 
 
 class ReflectDevelopmental(BaseModel):

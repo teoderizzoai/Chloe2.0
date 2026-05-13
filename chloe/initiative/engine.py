@@ -182,6 +182,8 @@ async def tick() -> object | None:
         # Mark source done regardless of gate outcome or exception.
         if best.source == "routine":
             mark_routine_done(best.source_id, now)
+        elif best.source == "interest":
+            _mark_interest_attempted(best.source_id)
         elif best.source == "curiosity":
             topic = best.source_id.removeprefix("curiosity:")
             mark_curiosity_surfaced(topic)
@@ -193,6 +195,21 @@ async def tick() -> object | None:
                 pass
 
     return result
+
+
+def _mark_interest_attempted(interest_id: str) -> None:
+    """Stamp last_engaged_at on an interest so it enters a cooldown window."""
+    try:
+        from chloe.state.db import get_connection
+        conn = get_connection()
+        conn.execute(
+            "UPDATE interest_garden SET last_engaged_at=? WHERE id=?",
+            (datetime.now().isoformat(), interest_id),
+        )
+        conn.commit()
+        log.debug("interest_attempted_marked", interest_id=interest_id)
+    except Exception as exc:
+        log.debug("interest_attempted_mark_failed", error=str(exc))
 
 
 def _score_candidate(c: CandidateAction, opp, recent: list, now: datetime, affect: dict) -> float:

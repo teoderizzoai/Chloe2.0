@@ -32,9 +32,13 @@ def upsert_mentioned_person(
         return -1
 
     conn = get_connection()
+    # Match by name OR by alias (aliases stored as JSON array, e.g. '["Zuzu","Zuza"]')
     row = conn.execute(
-        "SELECT id, gen_level, relationship_class FROM persons WHERE name=? COLLATE NOCASE LIMIT 1",
-        (name,),
+        """SELECT id, gen_level, relationship_class FROM persons
+           WHERE name=? COLLATE NOCASE
+              OR (aliases IS NOT NULL AND LOWER(aliases) LIKE ?)
+           LIMIT 1""",
+        (name, f'%"{name.lower()}"%'),
     ).fetchone()
 
     if row:

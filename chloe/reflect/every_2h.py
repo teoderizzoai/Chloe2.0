@@ -20,7 +20,7 @@ log = get_logger("reflect.every_2h")
 _gemini = GeminiClient()
 
 WINDOW_HOURS = 2
-RECENT_CHAT_TURNS = 30
+RECENT_CHAT_TURNS = 12
 LAST_REFLECT_KEY = "reflect:last_run_at"
 
 
@@ -256,6 +256,7 @@ async def _apply_output(output: ReflectOutput) -> dict:
                 tags=["continuity", "reflect_2h"],
                 weight=0.6,
                 salience=0.5,
+                emotional_labels=output.current_emotions or [],
             )
         except Exception as exc:
             log.warning("apply_continuity_failed", error=str(exc))
@@ -269,6 +270,13 @@ async def _apply_output(output: ReflectOutput) -> dict:
     if output.biased_summary:
         try:
             kv_set("reflect:biased_summary", output.biased_summary)
+        except Exception:
+            pass
+
+    if output.current_emotions:
+        try:
+            kv_set("reflect:current_emotions", output.current_emotions)
+            log.info("reflect_current_emotions", emotions=output.current_emotions)
         except Exception:
             pass
 
@@ -307,6 +315,53 @@ async def _apply_output(output: ReflectOutput) -> dict:
             pass
 
     return counts
+
+
+def _harvest_person_moments(conn, since: str) -> int:
+    """Promote high-salience episodic memories into person_moments.
+
+    Runs after each reflect pass. Only memories linked to a specific person
+    (subject_person_id set) with salience ≥ 0.7 qualify — these are the
+    memorable, notable exchanges: shared discoveries, inside jokes, strong
+    reactions. Capped at 200 per person to stay readable.
+    """
+    rows = conn.execute(
+        """SELECT subject_person_id, text, created_at
+           FROM memories
+           WHERE subject_person_id IS NOT NULL
+             AND kind = 'episodic'
+             AND salience >= 0.7
+             AND created_at > ?
+           ORDER BY created_at""",
+        (since,),
+    ).fetchall()
+
+    inserted = 0
+    for row in rows:
+        pid = row["subject_person_id"]
+        text = (row["text"] or "").strip()
+        if len(text) < 10:
+            continue
+        exists = conn.execute(
+            "SELECT 1 FROM person_moments WHERE person_id=? AND text=?",
+            (pid, text),
+        ).fetchone()
+        if exists:
+            continue
+        count = conn.execute(
+            "SELECT COUNT(*) FROM person_moments WHERE person_id=?", (pid,)
+        ).fetchone()[0]
+        if count >= 200:
+            continue
+        conn.execute(
+            "INSERT INTO person_moments (person_id, text, created_at) VALUES (?, ?, ?)",
+            (pid, text, row["created_at"]),
+        )
+        inserted += 1
+
+    if inserted:
+        conn.commit()
+    return inserted
 
 
 async def run_reflect(force: bool = False) -> dict | None:
@@ -393,6 +448,13 @@ async def run_reflect(force: bool = False) -> dict | None:
                       if k in ("recent_chat", "goals", "interests", "world_beliefs",
                                "affect_summary", "recent_outcomes")}
 
+    # Cache payloads for debug view
+    try:
+        kv_set("debug:last_reflect_inner_payload", inner_payload)
+        kv_set("debug:last_reflect_signal_payload", signal_payload)
+    except Exception:
+        pass
+
     try:
         inner_task = _gemini.flash("reflect_inner_state.md", inner_payload, ReflectCurrentState)
         signal_task = _gemini.flash("reflect_signals.md", signal_payload, ReflectDevelopmental)
@@ -401,8 +463,24 @@ async def run_reflect(force: bool = False) -> dict | None:
         log.warning("reflect_llm_error", error=str(exc))
         return None
 
+    # Cache results for debug view
+    try:
+        def _to_dict(r):
+            if r is None: return {}
+            if isinstance(r, dict): return r
+            try: return r.model_dump()
+            except Exception: return str(r)
+        kv_set("debug:last_reflect_inner_result", _to_dict(inner_result))
+        kv_set("debug:last_reflect_signal_result", _to_dict(signal_result))
+    except Exception:
+        pass
+
     if not inner_result and not signal_result:
-        log.warning("reflect_both_llm_failed")
+        chat_snippet = (payload.get("recent_chat") or "")[:200]
+        affect_snippet = (payload.get("affect_summary") or "")[:100]
+        log.warning("reflect_both_llm_failed",
+                    recent_chat_snippet=chat_snippet,
+                    affect_summary_snippet=affect_snippet)
         return None
 
     # Merge both results into a single ReflectOutput for _apply_output
@@ -411,12 +489,13 @@ async def run_reflect(force: bool = False) -> dict | None:
         "new_wants": [], "new_tensions": [], "new_interests": [],
         "new_goals": [], "goal_progress_updates": [], "new_world_beliefs": [],
         "trait_evidence": [], "recurring_loops": [], "biased_summary": "",
-        "new_anticipations": [], "new_questions": [],
+        "new_anticipations": [], "new_questions": [], "current_emotions": [],
     }
     if inner_result:
         r = inner_result if isinstance(inner_result, dict) else inner_result.model_dump()
         for k in ("continuity_note", "biased_summary", "recurring_loops",
-                  "new_wants", "new_tensions", "new_anticipations", "new_questions"):
+                  "new_wants", "new_tensions", "new_anticipations", "new_questions",
+                  "current_emotions"):
             if r.get(k):
                 merged[k] = r[k]
     if signal_result:
@@ -428,6 +507,12 @@ async def run_reflect(force: bool = False) -> dict | None:
 
     output = ReflectOutput(**merged)
     counts = await _apply_output(output)
+
+    last_ts = kv_get(LAST_REFLECT_KEY) or "1970-01-01T00:00:00+00:00"
+    moments_added = _harvest_person_moments(conn, since=last_ts)
+    if moments_added:
+        log.info("reflect_moments_harvested", count=moments_added)
+
     kv_set(LAST_REFLECT_KEY, _now().isoformat())
     log.info("reflect_complete", **counts, note=output.continuity_note[:80])
     return {"applied": counts, "continuity_note": output.continuity_note}
@@ -436,9 +521,20 @@ async def run_reflect(force: bool = False) -> dict | None:
 async def reflect_loop():
     """Background coroutine — checks every 5 minutes whether reflect is due."""
     import asyncio
+    consecutive_failures = 0
+    _CIRCUIT_THRESHOLD = 3
     while True:
         try:
-            await run_reflect()
+            if consecutive_failures >= _CIRCUIT_THRESHOLD:
+                log.warning("reflect_circuit_open", consecutive_failures=consecutive_failures)
+                consecutive_failures = 0
+            else:
+                result = await run_reflect()
+                if result is None:
+                    consecutive_failures += 1
+                else:
+                    consecutive_failures = 0
         except Exception as exc:
             log.warning("reflect_loop_error", error=str(exc))
+            consecutive_failures += 1
         await asyncio.sleep(300)

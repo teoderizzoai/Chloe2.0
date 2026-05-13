@@ -59,7 +59,10 @@ def record_trait_evidence(
     if not trait_name:
         return
 
-    # Semantic dedup: resolve to canonical trait name before lookup.
+    # Snap to approved personality vocabulary; empty return means it was an emotional word — skip.
+    trait_name = _snap_to_approved_trait(trait_name)
+    if not trait_name:
+        return
     trait_name = _resolve_trait_name(trait_name, conn)
 
     row = conn.execute(
@@ -227,6 +230,83 @@ def _parse_json_list(raw) -> list:
         return result if isinstance(result, list) else []
     except Exception:
         return []
+
+
+# ---------------------------------------------------------------------------
+# Approved trait vocabulary — LLM is instructed to pick from this list;
+# _snap_to_approved_trait() enforces it as a Python-level safety net.
+# ---------------------------------------------------------------------------
+
+_APPROVED_TRAITS: frozenset[str] = frozenset({
+    # Personality traits only — stable character patterns.
+    # Emotional states (Anxious, Curious as a mood, etc.) are not here;
+    # they are captured as current_emotions in reflect_inner_state.
+    "Accommodating", "Adventurous", "Ambitious", "Amiable", "Analytical", "Articulate",
+    "Assertive", "Authentic", "Balanced", "Benevolent", "Bold", "Caring", "Cautious",
+    "Charismatic", "Clever", "Committed", "Compassionate", "Conscientious", "Considerate",
+    "Cooperative", "Courageous", "Creative", "Curious", "Daring", "Decisive", "Dependable",
+    "Determined", "Diplomatic", "Discerning", "Disciplined", "Dreamer", "Energetic",
+    "Faithful", "Flexible", "Focused", "Frank", "Friendly", "Funny", "Generous", "Gracious",
+    "Grateful", "Humble", "Humorous", "Idealistic", "Impartial", "Impulsive", "Independent",
+    "Ingenious", "Innovative", "Insightful", "Inspiring", "Intelligent", "Inquisitive",
+    "Introverted", "Judicious", "Kind", "Logical", "Methodical", "Meticulous", "Modest",
+    "Motivated", "Nonjudgmental", "Nurturing", "Objective", "Observant", "Open-minded",
+    "Organized", "Passionate", "Patient", "Pensive", "Perceptive", "Persevering", "Persistent",
+    "Pioneering", "Practical", "Proactive", "Quiet", "Rational", "Realistic", "Reflective",
+    "Relaxed", "Reliable", "Reserved", "Resourceful", "Respectful", "Self-critical", "Selfless",
+    "Sensible", "Serene", "Serious", "Smart", "Spontaneous", "Steadfast", "Stoic", "Strategic",
+    "Supportive", "Tactful", "Tenacious", "Thoughtful", "Timid", "Trustworthy", "Understanding",
+    "Versatile", "Visionary", "Warm-hearted", "Whimsical", "Wise", "Witty",
+})
+
+_APPROVED_TRAITS_LOWER: dict[str, str] = {t.lower(): t for t in _APPROVED_TRAITS}
+
+# Emotional states — belong in current_emotions, not in personality trait_evidence.
+# If the LLM sends one of these as trait_implied, reject it (return "") rather than
+# fuzzy-mapping it to a wrong personality word.
+_EMOTIONAL_WORDS: frozenset[str] = frozenset({
+    "affectionate", "alarmed", "amused", "angry", "annoyed", "anxious", "apathetic",
+    "appreciative", "ashamed", "bewildered", "bitter", "bored", "calm", "cheerful",
+    "confident", "confused", "content", "defeated", "delighted", "depressed",
+    "despairing", "disappointed", "disgusted", "eager", "ecstatic", "elated",
+    "embarrassed", "empathetic", "enraged", "envious", "excited", "fearless",
+    "frightened", "frustrated", "grateful", "grumpy", "guilty", "happy", "hopeful",
+    "hopeless", "horrified", "humiliated", "impatient", "impressed", "irritated",
+    "imaginative", "indifferent", "jealous", "jolly", "joyful", "lonely", "loving",
+    "melancholic", "mischievous", "nervous", "optimistic", "overjoyed", "passionate",
+    "patient", "peaceful", "pessimistic", "perceptive", "pleased", "proud", "relieved",
+    "romantic", "sad", "satisfied", "scared", "sensitive", "shocked", "shy", "surprised",
+    "sympathetic", "terrified", "thankful", "thoughtful", "tolerant", "trusting",
+    "unhappy", "warm", "worried",
+})
+
+
+def _snap_to_approved_trait(candidate: str) -> str:
+    """Map any trait string to the nearest approved vocabulary word.
+
+    Tries exact match (case-insensitive) first, then falls back to difflib
+    closest-match. Returns the candidate unchanged only if no reasonable match
+    exists (similarity < 0.6), which means 'log and pass through' for Chroma
+    dedup to handle.
+    """
+    if not candidate:
+        return candidate
+    normalized = candidate.strip().lower()
+    # Reject emotional states — they belong in current_emotions, not trait_evidence.
+    if normalized in _EMOTIONAL_WORDS:
+        log.info("trait_rejected_emotional", candidate=candidate)
+        return ""
+    if normalized in _APPROVED_TRAITS_LOWER:
+        return _APPROVED_TRAITS_LOWER[normalized]
+    import difflib
+    matches = difflib.get_close_matches(normalized, _APPROVED_TRAITS_LOWER.keys(), n=1, cutoff=0.7)
+    if matches:
+        snapped = _APPROVED_TRAITS_LOWER[matches[0]]
+        if snapped != candidate:
+            log.info("trait_snapped", original=candidate, snapped=snapped)
+        return snapped
+    log.warning("trait_not_in_vocabulary", candidate=candidate)
+    return candidate
 
 
 # ---------------------------------------------------------------------------

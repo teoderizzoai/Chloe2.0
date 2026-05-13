@@ -33,6 +33,7 @@ class Memory:
     confidence: float = 1.0
     emotional_valence: float | None = None
     emotional_arousal: float | None = None
+    emotional_labels: list[str] = field(default_factory=list)
     tags: list = field(default_factory=list)
     artifact_refs: list = field(default_factory=list)
     created_at: str = ""
@@ -104,6 +105,8 @@ def query_fast(
         _apply_anchor_bonus(results)
         _apply_inside_joke_bonus(results, rich_q)
         _apply_affect_bonus(results)
+        _apply_emotion_label_bonus(results)
+        _apply_tag_overlap_bonus(results, rich_q)
     results.sort(key=lambda m: m.score, reverse=True)
 
     if rerank and results:
@@ -273,7 +276,8 @@ def query_mixed(
 def add_to_chroma(memory_id: int, text: str, kind: str, source: str | None,
                   artifact_refs: list, collection_name: str = "memories_v2",
                   emotional_valence: float | None = None,
-                  emotional_arousal: float | None = None) -> None:
+                  emotional_arousal: float | None = None,
+                  emotional_labels: list[str] | None = None) -> None:
     """Insert or update a memory document in ChromaDB."""
     try:
         from chloe.state.chroma import get_collection
@@ -287,6 +291,8 @@ def add_to_chroma(memory_id: int, text: str, kind: str, source: str | None,
             meta["emotional_valence"] = emotional_valence
         if emotional_arousal is not None:
             meta["emotional_arousal"] = emotional_arousal
+        if emotional_labels:
+            meta["emotional_labels"] = ",".join(emotional_labels)
         collection.upsert(
             ids=[str(memory_id)],
             documents=[text],
@@ -353,6 +359,8 @@ def _batch_build_memories(
         # Small bonus for memories that keep getting surfaced
         if reference_count > 3:
             score += 0.03
+        raw_labels = meta.get("emotional_labels", "") if meta else ""
+        emotion_list = [e.strip() for e in raw_labels.split(",") if e.strip()] if raw_labels else []
         results.append(Memory(
             id=row["id"],
             kind=row["kind"],
@@ -364,6 +372,7 @@ def _batch_build_memories(
             confidence=row["confidence"],
             emotional_valence=row["emotional_valence"],
             emotional_arousal=row["emotional_arousal"],
+            emotional_labels=emotion_list,
             tags=json.loads(row["tags"]) if row["tags"] else [],
             artifact_refs=json.loads(row["artifact_refs"]) if row["artifact_refs"] else [],
             created_at=created_at,
@@ -434,6 +443,32 @@ def _apply_affect_bonus(memories: list[Memory]) -> None:
         m.score += 0.08 * alignment
 
 
+def _apply_emotion_label_bonus(memories: list[Memory]) -> None:
+    """Boost memories whose emotional labels overlap with Chloe's current emotional state.
+
+    State-dependent recall: a memory formed while Curious surfaces more readily
+    when Chloe is currently Curious. Max bonus 0.06 per matching label, capped
+    at 0.10 total — keeps it a soft nudge, not a filter.
+    """
+    try:
+        from chloe.state.kv import get as kv_get
+        raw = kv_get("reflect:current_emotions")
+        if not raw:
+            return
+        current: set[str] = set(raw) if isinstance(raw, list) else set()
+        if not current:
+            return
+    except Exception:
+        return
+
+    for m in memories:
+        if not m.emotional_labels:
+            continue
+        overlap = current & set(m.emotional_labels)
+        if overlap:
+            m.score += min(0.10, 0.06 * len(overlap))
+
+
 def _apply_inside_joke_bonus(memories: list[Memory], query: str) -> None:
     """Add INSIDE_JOKE_BONUS to inside-joke memories when the query overlaps their topic."""
     for m in memories:
@@ -443,6 +478,29 @@ def _apply_inside_joke_bonus(memories: list[Memory], query: str) -> None:
                 if topic.lower() in query.lower():
                     m.score += INSIDE_JOKE_BONUS
                 break
+
+
+TAG_OVERLAP_BONUS = 0.07
+
+
+def _apply_tag_overlap_bonus(memories: list[Memory], query: str) -> None:
+    """Boost memories whose tags appear as words in the query.
+
+    Helps person-tagged memories (person:zuzu) surface reliably when Zuzu is
+    mentioned, and topic/concept tags surface when those concepts are in play.
+    Bonus is per matching tag, capped at 0.14 total so it stays a nudge.
+    """
+    query_words = set(query.lower().split())
+    for m in memories:
+        bonus = 0.0
+        for tag in m.tags:
+            # Normalize tag: strip prefixes like "person:", "joke_topic:", etc.
+            tag_core = tag.split(":", 1)[-1].lower()
+            if tag_core in query_words or any(tag_core in w for w in query_words):
+                bonus += TAG_OVERLAP_BONUS
+            if bonus >= 0.14:
+                break
+        m.score += bonus
 
 
 def _apply_anchor_bonus(memories: list[Memory]) -> None:

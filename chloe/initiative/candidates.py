@@ -285,10 +285,16 @@ def interest_driven_candidates(garden: list | None = None) -> list[CandidateActi
 
 def _load_interests() -> list[dict]:
     from chloe.state.db import get_connection
+    from datetime import datetime, timedelta
     conn = get_connection()
+    # 2h cooldown: skip interests attempted (or acted on) in the last 2 hours.
+    cutoff = (datetime.utcnow() - timedelta(hours=2)).isoformat()
     rows = conn.execute(
         "SELECT id, label, why, intensity, gen_level, last_engaged_at "
-        "FROM interest_garden WHERE intensity > 0.1 ORDER BY intensity DESC LIMIT 10"
+        "FROM interest_garden "
+        "WHERE intensity > 0.1 AND (last_engaged_at IS NULL OR last_engaged_at < ?) "
+        "ORDER BY intensity DESC LIMIT 10",
+        (cutoff,),
     ).fetchall()
     return [dict(r) for r in rows]
 

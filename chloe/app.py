@@ -5,11 +5,13 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from chloe.admin.api import admin_router
 from chloe.admin.shadow_routes import router as shadow_router
 from chloe.channels.confirm_routes import devices_router, router as confirm_router
+from chloe.channels.dashboard_routes import router as dashboard_router
 from chloe.channels.ha_prefs_routes import router as ha_prefs_router
 from chloe.channels.mobile_routes import router as mobile_router
 from chloe.channels.dashboard_ws import router as dashboard_ws_router
@@ -103,19 +105,32 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     app = FastAPI(title="Chloe 2.0", lifespan=lifespan)
 
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
     @app.get("/")
     async def health():
         return {"status": "ok"}
 
     app.include_router(metrics_router)
-    app.include_router(admin_router,   prefix="/admin")
+    app.include_router(admin_router,    prefix="/admin")
     app.include_router(shadow_router)
     app.include_router(confirm_router)
     app.include_router(devices_router)
     app.include_router(revert_router)
     app.include_router(mobile_router)
     app.include_router(dashboard_ws_router)
+    app.include_router(dashboard_router)
     app.include_router(ha_prefs_router)
+
+    # Serve the dashboard's /app/* static assets (CSS, JS, JSX files)
+    _app_dir = Path(__file__).resolve().parents[1] / "app"
+    if _app_dir.exists():
+        app.mount("/app", StaticFiles(directory=_app_dir), name="dashboard_assets")
 
     _ui_dir = Path(__file__).resolve().parents[1] / "static" / "ui"
     if _ui_dir.exists():

@@ -23,13 +23,20 @@ def get(key: str, default: Any = None) -> Any:
     row = conn.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
     if row is None:
         return default
-    return json.loads(row[0])
+    v = row[0]
+    if not isinstance(v, str):
+        return v  # SQLite returned native numeric type
+    return json.loads(v)
 
 
 def get_all() -> dict[str, Any]:
     conn = get_connection()
     rows = conn.execute("SELECT key, value FROM kv").fetchall()
-    return {row[0]: json.loads(row[1]) for row in rows}
+    result = {}
+    for row in rows:
+        v = row[1]
+        result[row[0]] = json.loads(v) if isinstance(v, str) else v
+    return result
 
 
 def delete(key: str) -> None:
