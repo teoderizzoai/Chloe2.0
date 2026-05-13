@@ -129,6 +129,8 @@ def create_app() -> FastAPI:
 
     # Serve the dashboard's /app/* static assets (CSS, JS, JSX files)
     _app_dir = Path(__file__).resolve().parents[1] / "app"
+    if not _app_dir.exists():
+        _app_dir = Path(__file__).resolve().parents[1] / "static"
     if _app_dir.exists():
         app.mount("/app", StaticFiles(directory=_app_dir), name="dashboard_assets")
 
