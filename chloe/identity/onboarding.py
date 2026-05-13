@@ -55,10 +55,10 @@ async def run_extraction(qa_text: str, conn=None) -> dict:
     # Clear previous extraction memories before re-writing (idempotent)
     conn.execute("DELETE FROM memories WHERE source='onboarding_extract'")
 
-    # Knowledge statements → semantic memories
+    # Knowledge statements → semantic memories tagged to Teo (subject_person_id=1)
     for stmt in extraction.get("knowledge_statements", []):
         if stmt.strip():
-            mem_store.add(
+            mid = mem_store.add(
                 kind="semantic",
                 text=stmt.strip(),
                 source="onboarding_extract",
@@ -66,11 +66,13 @@ async def run_extraction(qa_text: str, conn=None) -> dict:
                 weight=1.0,
                 tags=["onboarding", "teo_profile", "knowledge"],
             )
+            conn.execute("UPDATE memories SET subject_person_id=1 WHERE id=?", (mid,))
+    conn.commit()
 
-    # Biography → autobiographical memory
+    # Biography → autobiographical memory tagged to Teo
     biography = (extraction.get("biography") or "").strip()
     if biography:
-        mem_store.add(
+        mid = mem_store.add(
             kind="autobiographical",
             text=biography,
             source="onboarding_extract",
@@ -78,6 +80,8 @@ async def run_extraction(qa_text: str, conn=None) -> dict:
             weight=1.0,
             tags=["onboarding", "teo_profile", "biography"],
         )
+        conn.execute("UPDATE memories SET subject_person_id=1 WHERE id=?", (mid,))
+        conn.commit()
 
     # Trait profile → persons row
     trait_profile = extraction.get("trait_profile", {})
@@ -115,15 +119,21 @@ async def run_extraction(qa_text: str, conn=None) -> dict:
                     (thread, now),
                 )
 
-    # Interests → interest_garden
+    # Interests → semantic memories about Teo, NOT Chloe's interest_garden.
+    # Chloe should develop her own interests through conversation, not inherit them at intake.
     for interest_label in extraction.get("interests", []):
         interest_label = interest_label.strip()
         if interest_label:
-            try:
-                from chloe.identity.interest_garden import add_interest
-                add_interest(interest_label, why="from onboarding", intensity=0.5, category="curiosity")
-            except Exception as exc:
-                log.warning("interest_seed_failed", label=interest_label, error=str(exc))
+            mid = mem_store.add(
+                kind="semantic",
+                text=f"Teo is into {interest_label}",
+                source="onboarding_extract",
+                salience=0.75,
+                weight=1.0,
+                tags=["onboarding", "teo_profile", "interest"],
+            )
+            conn.execute("UPDATE memories SET subject_person_id=1 WHERE id=?", (mid,))
+    conn.commit()
 
     # People → persons + person_notes + person_third_parties + subject memories
     people_created = []

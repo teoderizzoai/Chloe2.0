@@ -219,8 +219,8 @@ async def dashboard_state() -> dict:
         # Semantic memories linked to this person
         know_rows = conn.execute(
             "SELECT text FROM memories "
-            "WHERE subject_person_id=? AND kind='semantic' "
-            "ORDER BY salience DESC, id DESC LIMIT 10",
+            "WHERE subject_person_id=? AND kind IN ('semantic', 'autobiographical') "
+            "ORDER BY salience DESC, id DESC LIMIT 30",
             (p["id"],),
         ).fetchall()
         seen = set(things_she_knows)

@@ -570,6 +570,8 @@ async def complete_onboarding(body: OnboardingComplete) -> dict:
     )
 
     # Store raw Q&A immediately so memories are available before extraction finishes
+    from chloe.state.db import get_connection as _get_conn
+    _conn = _get_conn()
     raw_ids = []
     for item in body.answers:
         if item.answer.strip():
@@ -582,6 +584,8 @@ async def complete_onboarding(body: OnboardingComplete) -> dict:
                 tags=["onboarding", "teo_profile"],
             )
             raw_ids.append(mid)
+            _conn.execute("UPDATE memories SET subject_person_id=1 WHERE id=?", (mid,))
+    _conn.commit()
 
     kv_set("onboarding:teo:complete", "1")
 
