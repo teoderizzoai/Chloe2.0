@@ -560,11 +560,8 @@ async def onboarding_status() -> dict:
 @admin_router.post("/onboarding/complete")
 async def complete_onboarding(body: OnboardingComplete) -> dict:
     from chloe.memory import store as mem_store
-    from chloe.state.db import get_connection
     from chloe.state.kv import set as kv_set
     import asyncio
-
-    conn = get_connection()
 
     qa_text = "\n\n".join(
         f"Q: {item.question}\nA: {item.answer.strip()}"
@@ -572,7 +569,7 @@ async def complete_onboarding(body: OnboardingComplete) -> dict:
         if item.answer.strip()
     )
 
-    # Store raw Q&A as onboarding memories (these will be replaced/supplemented by extraction)
+    # Store raw Q&A immediately so memories are available before extraction finishes
     raw_ids = []
     for item in body.answers:
         if item.answer.strip():
@@ -586,14 +583,27 @@ async def complete_onboarding(body: OnboardingComplete) -> dict:
             )
             raw_ids.append(mid)
 
-    # Run structured extraction
-    extraction = await _run_onboarding_extraction(qa_text, conn)
-
     kv_set("onboarding:teo:complete", "1")
-    log.info("onboarding_complete", raw_memories=len(raw_ids),
-             knowledge=len(extraction.get("knowledge_statements", [])),
-             people=len(extraction.get("people", [])))
-    return {"status": "ok", "raw_memories": len(raw_ids), **extraction}
+
+    # Run extraction in background — don't block the response
+    asyncio.create_task(_run_extraction_bg(qa_text))
+
+    log.info("onboarding_complete", raw_memories=len(raw_ids))
+    return {"status": "ok", "raw_memories": len(raw_ids), "extraction": "pending"}
+
+
+async def _run_extraction_bg(qa_text: str) -> None:
+    """Background task: structured extraction after onboarding answers are stored."""
+    try:
+        from chloe.identity.onboarding import run_extraction
+        from chloe.state.db import get_connection
+        conn = get_connection()
+        result = await run_extraction(qa_text, conn)
+        log.info("onboarding_extraction_bg_done",
+                 knowledge=result.get("knowledge_statements", 0),
+                 people=len(result.get("people_found") or []))
+    except Exception as exc:
+        log.warning("onboarding_extraction_bg_failed", error=str(exc))
 
 
 @admin_router.post("/onboarding/re-extract")
