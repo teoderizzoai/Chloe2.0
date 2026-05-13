@@ -8,6 +8,9 @@ APP_DIR=/opt/chloe
 
 echo "[setup] Installing system packages..."
 apt-get update -q
+apt-get install -y -q software-properties-common
+add-apt-repository -y ppa:deadsnakes/ppa
+apt-get update -q
 apt-get install -y -q python3.12 python3.12-venv python3-pip nginx nodejs npm git
 
 echo "[setup] Cloning repository..."
