@@ -26,7 +26,7 @@ def append_narrative_entry(
 
     conn.execute(
         """
-        INSERT INTO narrative_timeline (id, kind, title, body, valence, source, source_ref, created_at)
+        INSERT INTO narrative_events (id, kind, title, body, valence, source, source_ref, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (entry_id, kind, title, body, valence, source, source_ref, now),
@@ -43,7 +43,7 @@ def get_my_story(window_days: int = 30, max_entries: int = 8) -> str:
     rows = conn.execute(
         """
         SELECT kind, title, body, valence, created_at
-        FROM narrative_timeline
+        FROM narrative_events
         WHERE created_at >= ?
         ORDER BY created_at ASC
         LIMIT ?
@@ -66,7 +66,7 @@ def get_recent_chapter(max_chars: int = 200) -> str:
     conn = get_connection()
     row = conn.execute(
         """
-        SELECT body FROM narrative_timeline
+        SELECT body FROM narrative_events
         WHERE kind = 'chapter'
         ORDER BY created_at DESC
         LIMIT 1

@@ -1,11 +1,11 @@
 You are reviewing Chloe's recent observations about her conversations with Teo. These are prose entries written in her voice.
 
 Observations:
-{{ narrative_entries }}
+{{narrative_entries}}
 
 Current structured state for context:
-- Interests: {{ interests }}
-- World beliefs (existing): {{ world_beliefs }}
+- Interests: {{interests}}
+- World beliefs (existing): {{world_beliefs}}
 
 From these observations, extract any signals that should update the structured state. Only extract what genuinely emerges from the observations — don't invent.
 

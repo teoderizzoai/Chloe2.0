@@ -6,6 +6,7 @@ inner_* tables stay empty forever and the initiative engine has no candidates.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 
@@ -13,7 +14,7 @@ from chloe.observability.logging import get_logger
 from chloe.state.db import get_connection
 from chloe.state.kv import get as kv_get, set as kv_set
 from chloe.llm.gemini import GeminiClient
-from chloe.llm.schemas import ReflectOutput
+from chloe.llm.schemas import ReflectOutput, ReflectCurrentState, ReflectDevelopmental
 
 log = get_logger("reflect.every_2h")
 _gemini = GeminiClient()
@@ -376,18 +377,56 @@ async def run_reflect(force: bool = False) -> dict | None:
             log.warning("reflect_router_error", error=str(exc))
             # Fall through to the full reflect on router failure
 
-    # --- Pass 2: Full specialist reflect ---
+    # --- Pass 2: Two parallel specialist Flash calls replace the single 12-field monolith.
+    #
+    # reflect_inner_state.md → ReflectCurrentState: felt inner-state changes
+    #   (wants, tensions, loops, biased_summary, anticipations, questions)
+    # reflect_signals.md → ReflectDevelopmental: slower developmental signals
+    #   (interests, goals, beliefs, trait_evidence)
+    #
+    # Running concurrently halves the wait vs. sequential. Each call is independently
+    # robust — JSON dropout in one doesn't silence the other.
+    inner_payload = {k: v for k, v in payload.items()
+                     if k in ("recent_chat", "affect_summary", "recent_outcomes",
+                              "current_wants", "current_fears", "current_tensions")}
+    signal_payload = {k: v for k, v in payload.items()
+                      if k in ("recent_chat", "goals", "interests", "world_beliefs",
+                               "affect_summary", "recent_outcomes")}
+
     try:
-        result = await _gemini.flash("reflect_combined.md", payload, ReflectOutput)
+        inner_task = _gemini.flash("reflect_inner_state.md", inner_payload, ReflectCurrentState)
+        signal_task = _gemini.flash("reflect_signals.md", signal_payload, ReflectDevelopmental)
+        inner_result, signal_result = await asyncio.gather(inner_task, signal_task)
     except Exception as exc:
         log.warning("reflect_llm_error", error=str(exc))
         return None
 
-    if not result:
-        log.warning("reflect_llm_returned_none")
+    if not inner_result and not signal_result:
+        log.warning("reflect_both_llm_failed")
         return None
 
-    output = ReflectOutput(**result) if isinstance(result, dict) else result
+    # Merge both results into a single ReflectOutput for _apply_output
+    merged: dict = {
+        "continuity_note": "",
+        "new_wants": [], "new_tensions": [], "new_interests": [],
+        "new_goals": [], "goal_progress_updates": [], "new_world_beliefs": [],
+        "trait_evidence": [], "recurring_loops": [], "biased_summary": "",
+        "new_anticipations": [], "new_questions": [],
+    }
+    if inner_result:
+        r = inner_result if isinstance(inner_result, dict) else inner_result.model_dump()
+        for k in ("continuity_note", "biased_summary", "recurring_loops",
+                  "new_wants", "new_tensions", "new_anticipations", "new_questions"):
+            if r.get(k):
+                merged[k] = r[k]
+    if signal_result:
+        r = signal_result if isinstance(signal_result, dict) else signal_result.model_dump()
+        for k in ("new_interests", "new_goals", "goal_progress_updates",
+                  "new_world_beliefs", "trait_evidence"):
+            if r.get(k):
+                merged[k] = r[k]
+
+    output = ReflectOutput(**merged)
     counts = await _apply_output(output)
     kv_set(LAST_REFLECT_KEY, _now().isoformat())
     log.info("reflect_complete", **counts, note=output.continuity_note[:80])

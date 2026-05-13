@@ -43,7 +43,8 @@ async def distill_procedural() -> list[int]:
 def _load_feedback_pairs() -> list[dict]:
     """
     Load (action, user_response) pairs from the last 7 days.
-    Includes: denied confirmations, reverted actions, user_praised tagged actions.
+    Includes: denied confirmations, reverted actions, user_praised tagged actions,
+    and 👍/👎 reply reactions for active learning.
     """
     conn = get_connection()
     cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
@@ -94,6 +95,34 @@ def _load_feedback_pairs() -> list[dict]:
             "response_kind": row["response_kind"],
         })
 
+    # Include reply reactions (👍/👎) as lightweight feedback pairs
+    try:
+        reactions = conn.execute(
+            """
+            SELECT rr.reaction, rr.created_at,
+                   m.text as reply_text
+            FROM reply_reactions rr
+            LEFT JOIN memories m ON m.id = rr.reply_memory_id
+            WHERE rr.created_at >= ?
+            ORDER BY rr.created_at DESC
+            LIMIT 50
+            """,
+            (cutoff,),
+        ).fetchall()
+        for row in reactions:
+            reply_preview = (row["reply_text"] or "")[:200]
+            pairs.append({
+                "action_id": None,
+                "tool": "chat",
+                "verb": "reply",
+                "args": {"reply_preview": reply_preview},
+                "intent": f"sent a reply: {reply_preview[:80]}",
+                "proposed_at": row["created_at"],
+                "response_kind": row["reaction"],  # 'thumbs_up' or 'thumbs_down'
+            })
+    except Exception:
+        pass  # reply_reactions table may not exist yet in older DBs
+
     return pairs
 
 
@@ -106,6 +135,9 @@ async def _extract_rules_from_batch(batch: list[dict], batch_idx: int) -> list[P
             "Analyze these action-feedback pairs. "
             "For each pattern you notice (same tool being denied/reverted repeatedly, "
             "or a type of action consistently praised), extract a concise procedural rule. "
+            "Also examine reply reactions: 'thumbs_up' means the reply resonated — extract "
+            "what made it work ('When X, say/do Y'). 'thumbs_down' means it missed — "
+            "extract what to avoid ('When X, avoid Y'). "
             "Rules should be actionable: 'When X, do/avoid Y.' "
             "Include the tool name and be specific about context."
         ),

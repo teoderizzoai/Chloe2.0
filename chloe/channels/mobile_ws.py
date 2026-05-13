@@ -40,6 +40,12 @@ async def handle_mobile_ws(websocket: Any, person_id: str = "1") -> None:
     client = genai.Client(api_key=api_key)
     history: list[dict] = []
 
+    # Per-session preflight slot cache — avoids re-resolving the same person
+    # or belief slot on consecutive turns. Cleared automatically when the WS closes.
+    import uuid as _uuid
+    _session_id = str(_uuid.uuid4())
+    _slot_cache: dict[str, str] = {}
+
     turns_this_session = 0
     try:
         while True:
@@ -50,7 +56,15 @@ async def handle_mobile_ws(websocket: Any, person_id: str = "1") -> None:
                 await websocket.send_text(json.dumps({"type": "error", "detail": "invalid json"}))
                 continue
 
-            if msg.get("type") != "message":
+            msg_type = msg.get("type")
+
+            # Handle 👍/👎 reactions for active learning
+            if msg_type == "reaction":
+                import asyncio
+                asyncio.create_task(_handle_reaction(msg, person_id))
+                continue
+
+            if msg_type != "message":
                 continue
 
             user_text = msg.get("text", "").strip()
@@ -66,8 +80,27 @@ async def handle_mobile_ws(websocket: Any, person_id: str = "1") -> None:
             # Resolve any pending kinetic-sensitive confirm ticket if user consented.
             await _maybe_resolve_pending_confirm(user_text, person_id)
 
+            # Run preflight and dynamic suffix in parallel — both start immediately.
+            # Preflight (~200–350ms) routes to targeted data sources, captures facts,
+            # detects verb gaps. Dynamic suffix (~50–150ms) assembles ambient context.
+            # Net wait = max(preflight, suffix) not sum.
+            import asyncio as _asyncio
+            from chloe.channels.preflight import run_preflight
+            from chloe.channels.chat_api import build_dynamic_suffix
+
+            preflight_result, dynamic_suffix = await _asyncio.gather(
+                run_preflight(user_text, history, person_id,
+                              slot_cache=_slot_cache, session_id=_session_id),
+                build_dynamic_suffix(person_id, user_text, salience=0.5),
+            )
+
+            # Re-assemble with salience gate applied now that preflight.salience is known
+            dynamic_suffix = _trim_by_salience(dynamic_suffix, preflight_result.salience)
+
             reply = await _chat_reply_streaming(
-                client, genai_types, user_text, person_id, history, websocket
+                client, genai_types, user_text, person_id, history, websocket,
+                preflight_context=preflight_result.context_block,
+                dynamic_suffix=dynamic_suffix,
             )
 
             history.append({"role": "user", "parts": [{"text": user_text}]})
@@ -81,7 +114,6 @@ async def handle_mobile_ws(websocket: Any, person_id: str = "1") -> None:
                 _persist_chat_turn("assistant", reply, person_id)
                 import asyncio
                 asyncio.create_task(_extract_and_process_mentions(user_text, reply, person_id))
-                asyncio.create_task(_run_intercept(user_text, person_id))
                 asyncio.create_task(_witness_pass(user_text, reply, person_id))
 
             await websocket.send_text(json.dumps({"type": "done", "artifact_preview": None}))
@@ -128,21 +160,35 @@ async def _route_kinetic_sensitive_via_gate(
 
 
 async def _chat_reply_streaming(
-    client, genai_types, text: str, person_id: str, history: list[dict], websocket
+    client, genai_types, text: str, person_id: str, history: list[dict], websocket,
+    preflight_context: str = "",
+    dynamic_suffix: str = "",
 ) -> str:
     """Like _chat_reply but streams the final text turn over the websocket.
 
     Tool hops (structured JSON) are still sent in a single round-trip — there's
     nothing useful to stream there. Only the final text generation is chunked.
     The fully accumulated reply is returned so the caller can persist it.
+
+    `dynamic_suffix` is pre-built by the caller (run in parallel with preflight).
+    If empty, it is built here as a fallback.
     """
+    import time
+    _turn_start = time.monotonic()
     try:
-        from chloe.channels.chat_api import build_dynamic_suffix
         from chloe.tools.registry import get_registry
 
-        dynamic = await build_dynamic_suffix(person_id, text)
+        if not dynamic_suffix:
+            from chloe.channels.chat_api import build_dynamic_suffix
+            dynamic_suffix = await build_dynamic_suffix(person_id, text)
+
         char_prefix = _CHAR_PREFIX_PATH.read_text() if _CHAR_PREFIX_PATH.exists() else ""
-        system_prompt = f"{char_prefix}\n\n{dynamic}"
+        # Preflight context goes between the character prefix and the ambient dynamic suffix
+        # so the targeted info is prominent but the character voice comes first.
+        if preflight_context:
+            system_prompt = f"{char_prefix}\n\n{preflight_context}\n\n{dynamic_suffix}"
+        else:
+            system_prompt = f"{char_prefix}\n\n{dynamic_suffix}"
 
         registry = get_registry()
         tool_decls = registry.gemini_tool_declarations()
@@ -162,9 +208,12 @@ async def _chat_reply_streaming(
             )
             calls = _extract_function_calls(resp)
             if not calls:
-                # Final text — stream it
+                # Final text — stream it (counts as TTFT for tool-hop path)
                 final_text = (resp.text or "").strip()
                 if final_text:
+                    ttft = time.monotonic() - _turn_start
+                    log.info("chat_ttft", ttft_seconds=round(ttft, 3), path="single_shot",
+                             hops=hop, system_prompt_chars=len(system_prompt))
                     await websocket.send_text(json.dumps({"type": "chunk", "text": final_text}))
                 return final_text
 
@@ -220,6 +269,7 @@ async def _chat_reply_streaming(
         # Hop cap reached — stream the final answer with no tools.
         no_tool_config = genai_types.GenerateContentConfig(system_instruction=system_prompt)
         accumulated = ""
+        _ttft_logged = False
         try:
             async for chunk in await client.aio.models.generate_content_stream(
                 model="gemini-2.5-flash",
@@ -228,6 +278,11 @@ async def _chat_reply_streaming(
             ):
                 chunk_text = chunk.text or ""
                 if chunk_text:
+                    if not _ttft_logged:
+                        ttft = time.monotonic() - _turn_start
+                        log.info("chat_ttft", ttft_seconds=round(ttft, 3), path="streaming",
+                                 hops=_MAX_TOOL_HOPS, system_prompt_chars=len(system_prompt))
+                        _ttft_logged = True
                     accumulated += chunk_text
                     await websocket.send_text(json.dumps({"type": "chunk", "text": chunk_text}))
         except Exception:
@@ -239,7 +294,12 @@ async def _chat_reply_streaming(
             )
             accumulated = (final.text or "").strip()
             if accumulated:
+                ttft = time.monotonic() - _turn_start
+                log.info("chat_ttft", ttft_seconds=round(ttft, 3), path="streaming_fallback",
+                         hops=_MAX_TOOL_HOPS, system_prompt_chars=len(system_prompt))
                 await websocket.send_text(json.dumps({"type": "chunk", "text": accumulated}))
+        total_latency = time.monotonic() - _turn_start
+        log.info("chat_turn_latency", total_seconds=round(total_latency, 3))
         return accumulated.strip()
     except Exception as exc:
         log.warning("mobile_chat_streaming_failed", error=str(exc))
@@ -296,18 +356,44 @@ async def _extract_and_process_mentions(user_text: str, reply: str, person_id: s
 
         for rxn in data.get("aesthetic_reactions", []):
             try:
+                rxn_d = rxn if isinstance(rxn, dict) else rxn.model_dump()
                 log_reaction(
-                    stimulus=rxn.get("stimulus", "")[:400],
-                    domain=rxn.get("domain", "unknown"),
-                    valence=float(rxn.get("valence", 0.0)),
-                    intensity=float(rxn.get("intensity", 0.5)),
-                    notes=rxn.get("notes", ""),
+                    stimulus=rxn_d.get("stimulus", "")[:400],
+                    domain=rxn_d.get("domain", "unknown"),
+                    valence=float(rxn_d.get("valence", 0.0)),
+                    intensity=float(rxn_d.get("intensity", 0.5)),
+                    notes=rxn_d.get("notes", ""),
+                    confidentiality=rxn_d.get("confidentiality", "public"),
                 )
             except Exception as exc:
                 log.warning("aesthetic_reaction_log_failed", error=str(exc))
 
         salience = float(data.get("salience", 0.3))
         ambiguity = float(data.get("ambiguity", 0.2))
+        person_valence = float(data.get("person_valence", 0.0))
+        person_arousal = float(data.get("person_arousal", 0.4))
+
+        # Back-fill emotional valence/arousal on the chat memories just written.
+        # The memory is written before extraction runs, so we UPDATE it here now
+        # that we have the emotional register. This activates mood-congruent retrieval.
+        try:
+            from chloe.state.db import get_connection as _gc
+            from chloe.memory.store import update_memory_affect
+            _conn = _gc()
+            recent_chat_ids = _conn.execute(
+                "SELECT id FROM memories WHERE source='chat' AND source_ref=? "
+                "ORDER BY id DESC LIMIT 2",
+                (f"chat:{person_id}",),
+            ).fetchall()
+            for row in recent_chat_ids:
+                update_memory_affect(row["id"], person_valence, person_arousal)
+            if recent_chat_ids:
+                log.info("chat_memory_affect_written",
+                         ids=[r["id"] for r in recent_chat_ids],
+                         valence=round(person_valence, 2), arousal=round(person_arousal, 2))
+        except Exception as exc:
+            log.warning("chat_affect_update_failed", error=str(exc))
+
         if consider_unprocessed(salience, ambiguity):
             from chloe.state.db import get_connection
             conn = get_connection()
@@ -320,10 +406,6 @@ async def _extract_and_process_mentions(user_text: str, reply: str, person_id: s
                 mark_unprocessed(row["id"], True)
                 log.info("chat_memory_marked_unprocessed", id=row["id"],
                          salience=salience, ambiguity=ambiguity)
-
-        # Log Teo's apparent emotional state + engagement quality
-        person_valence = float(data.get("person_valence", 0.0))
-        person_arousal = float(data.get("person_arousal", 0.4))
         engagement_quality = _estimate_engagement_quality(user_text, reply)
         try:
             from chloe.state.db import get_connection
@@ -454,14 +536,6 @@ async def _maybe_resolve_pending_confirm(user_text: str, person_id: str) -> None
         log.warning("chat_confirm_resolution_failed", error=str(exc))
 
 
-async def _run_intercept(user_text: str, person_id: str) -> None:
-    """Background wrapper for the message intercept layer. Never raises."""
-    try:
-        from chloe.channels.intercept import run_intercept
-        await run_intercept(user_text, person_id)
-    except Exception as exc:
-        log.warning("intercept_task_failed", error=str(exc))
-
 
 def _estimate_engagement_quality(user_text: str, chloe_reply: str) -> float:
     """Heuristic: estimate how present/engaged Teo seems from his message.
@@ -523,6 +597,40 @@ async def _post_chat_reflect() -> None:
         log.warning("post_chat_reflect_failed", error=str(exc))
 
 
+async def _handle_reaction(msg: dict, person_id: str) -> None:
+    """Store a 👍/👎 reaction for active learning in weekly procedural distillation.
+
+    Expected message shape: {type: "reaction", reaction: "thumbs_up"|"thumbs_down", reply_id: int|null}
+    """
+    try:
+        reaction = msg.get("reaction", "")
+        if reaction not in ("thumbs_up", "thumbs_down"):
+            return
+        reply_id = msg.get("reply_id")
+        pid = int(person_id)
+
+        from chloe.state.db import get_connection
+        conn = get_connection()
+
+        # If no reply_id given, attach to the most recent assistant memory
+        if not reply_id:
+            row = conn.execute(
+                "SELECT id FROM memories WHERE source='chat' AND source_ref=? "
+                "AND text LIKE 'I said:%' ORDER BY id DESC LIMIT 1",
+                (f"chat:{person_id}",),
+            ).fetchone()
+            reply_id = row["id"] if row else None
+
+        conn.execute(
+            "INSERT INTO reply_reactions (reply_memory_id, person_id, reaction) VALUES (?, ?, ?)",
+            (reply_id, pid, reaction),
+        )
+        conn.commit()
+        log.info("reply_reaction_stored", reaction=reaction, reply_id=reply_id, person_id=person_id)
+    except Exception as exc:
+        log.warning("handle_reaction_failed", error=str(exc))
+
+
 def _persist_chat_turn(role: str, text: str, person_id: str) -> None:
     """Write a chat turn as a low-salience episodic memory.
 
@@ -546,3 +654,30 @@ def _persist_chat_turn(role: str, text: str, person_id: str) -> None:
         conn.commit()
     except Exception as exc:
         log.warning("chat_persist_failed", error=str(exc))
+
+
+# Heavy introspective blocks skipped for routine (low-salience) messages.
+# These sections are expensive in system-prompt tokens and irrelevant when
+# Teo is asking about the weather or sharing a quick thought.
+_ROUTINE_SKIP_HEADERS = {
+    "## Patterns you keep falling into",
+    "## Background texture",
+    "## Things you're genuinely wondering about",
+    "## How your current state is shaping your perception",
+    "## What to recalibrate this week",
+}
+
+
+def _trim_by_salience(dynamic: str, salience: float) -> str:
+    """Remove heavy introspective blocks when the message is routine (salience < 0.4)."""
+    if salience >= 0.4:
+        return dynamic
+    # The suffix is assembled as "\n\n".join(parts) where each part starts with "## Header\n..."
+    parts = dynamic.split("\n\n")
+    kept = []
+    for part in parts:
+        first_line = part.split("\n")[0].strip()
+        if any(first_line.startswith(h) for h in _ROUTINE_SKIP_HEADERS):
+            continue
+        kept.append(part)
+    return "\n\n".join(kept)

@@ -1,5 +1,7 @@
 You're extracting social mentions, aesthetic reactions, and experience quality from a conversation exchange.
 
+<!-- max_output_tokens: 400 -->
+
 ## Exchange
 {{exchange}}
 
@@ -23,6 +25,7 @@ When the speaker shares something they experienced aesthetically — a song, pie
 - **valence**: float -1..1 (1 = deeply resonant, -1 = aversive, 0 = neutral)
 - **intensity**: float 0..1 (how strong the reaction was)
 - **notes**: any specific quality Chloe noticed — ≤100 chars, or ""
+- **confidentiality**: "public" if the aesthetic experience was shared openly. "private" if Teo shared it with an expectation of discretion (e.g. "that song wrecked me — don't tell anyone"). "relational" if emotionally significant but not explicitly private.
 
 Only include if there's an actual aesthetic moment — not for generic conversation.
 
@@ -37,12 +40,22 @@ Read the user's messages and estimate:
 
 Base this only on what's observable in the text. Default to 0.0 and 0.4 if the exchange is too short or ambiguous to read.
 
+## What good output looks like
+
+**Social mention — bad:** `{ "name": "Marco", "content": "Marco seems to be going through a difficult time emotionally", "confidentiality": "relational" }`
+**Social mention — good:** `{ "name": "Marco", "content": "Marco lost his job last month", "confidentiality": "private" }`
+*(Use what was literally said, not your inference. Use "private" when it clearly wasn't meant for wide sharing.)*
+
+**Aesthetic reaction — bad:** `{ "stimulus": "a song", "valence": 0.5, "intensity": 0.5, "notes": "pleasant" }`
+**Aesthetic reaction — good:** `{ "stimulus": "Arca – Desafío", "domain": "music", "valence": 0.9, "intensity": 0.8, "notes": "the texture at 2:30 — like the sound is bruised", "confidentiality": "public" }`
+*(Be specific about what was shared and what struck Chloe about it.)*
+
 ## Output
 
 ```json
 {
   "social_mentions": [ { "name": "...", "content": "...", "emotional_valence": 0.0, "confidentiality": "relational" } ],
-  "aesthetic_reactions": [ { "stimulus": "...", "domain": "music", "valence": 0.5, "intensity": 0.6, "notes": "" } ],
+  "aesthetic_reactions": [ { "stimulus": "...", "domain": "music", "valence": 0.5, "intensity": 0.6, "notes": "", "confidentiality": "public" } ],
   "salience": 0.3,
   "ambiguity": 0.2,
   "person_valence": 0.0,

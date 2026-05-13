@@ -10,10 +10,15 @@ log = get_logger("channels.chat_api")
 _GAP_THRESHOLD_HOURS = 4
 
 
-async def build_dynamic_suffix(person_id: str, message: str = "") -> str:
-    # Run the three independent prep tasks concurrently. Previously sequential:
-    # audit -> affect -> retrieval -> grade(LLM!) — saved ~1–2s by dropping
-    # the grade Flash call and parallelizing the rest.
+async def build_dynamic_suffix(person_id: str, message: str = "", salience: float = 0.5) -> str:
+    """Build the per-turn dynamic system prompt suffix.
+
+    `salience` (from the preflight result) gates heavy introspective blocks:
+    blocks marked as routine-only are included when salience >= 0.4.
+    The salience gate is a soft optimization — the caller (_trim_by_salience)
+    applies it post-hoc once the preflight result is known.
+    """
+    # Run the three independent prep tasks concurrently.
     affect = load_affect()
     actions_task = audit.recent(n=20)
     narrative_task = _load_narrative_block(message) if message else _noop()
@@ -113,7 +118,15 @@ async def build_dynamic_suffix(person_id: str, message: str = "") -> str:
     if novelty_note:
         parts.append(f"## Background texture\n{novelty_note}")
 
-    return "\n\n".join(parts)
+    # Onboarding block: early conversations before the system has built context.
+    onboarding = _onboarding_note()
+    if onboarding:
+        parts.insert(0, onboarding)
+
+    # Voice anchor: always appended last so recency bias reinforces the voice.
+    parts.append(_voice_anchor())
+
+    return _apply_token_budget(parts)
 
 
 async def _noop() -> str:
@@ -587,3 +600,62 @@ def _load_novelty_deficit_block() -> str:
         return "Looking for something to catch — recent inputs have been flat, nothing has surprised you."
     except Exception:
         return ""
+
+
+def _onboarding_note() -> str:
+    """Return an onboarding block for early conversations before context accumulates.
+
+    Fires when there are fewer than 15 memories (not counting system/action sources),
+    signaling that this is genuinely early. Suppresses it after the first bootstrap.
+    """
+    try:
+        from chloe.state.db import get_connection
+        conn = get_connection()
+        count = conn.execute(
+            "SELECT COUNT(*) FROM memories WHERE source NOT IN ('action', 'system') AND archived_tier='hot'"
+        ).fetchone()[0]
+        if count >= 15:
+            return ""
+        return (
+            "## This is early\n"
+            "You and Teo are still at the beginning. You don't know him well yet — "
+            "don't perform depth you haven't earned. Be curious. Ask one thing if something "
+            "catches. Let the relationship develop at its own pace."
+        )
+    except Exception:
+        return ""
+
+
+_SUFFIX_TOKEN_BUDGET = 2500  # ≈10k chars; Flash context is large but recency bias worsens past here
+
+
+def _apply_token_budget(parts: list[str], max_tokens: int = _SUFFIX_TOKEN_BUDGET) -> str:
+    """Join parts, dropping from the back until total is within budget.
+
+    Voice anchor (always last) and onboarding (always first, if present) are
+    protected. Blocks between them are dropped tail-first, which removes the
+    lower-priority context (teo-read, aesthetic, novelty) before the higher-
+    priority blocks (affect, memories, inner state).
+    """
+    if not parts:
+        return ""
+    anchor = parts[-1]
+    body = parts[:-1]
+    budget_chars = max_tokens * 4
+    while body and len("\n\n".join(body)) > budget_chars:
+        body.pop()
+    return "\n\n".join(body + [anchor])
+
+
+def _voice_anchor() -> str:
+    """Short voice reminder appended after all context blocks.
+
+    Placed last so recency bias in long system prompts reinforces the voice
+    rules rather than the meta-cognitive blocks that precede it.
+    """
+    return (
+        "## Stay yourself\n"
+        "Short sentences. Say the thing, then explain it — not the other way around. "
+        "If a tool returns success, say what happened in one line, in your voice — not the API's voice. "
+        "Don't start with 'I'. Don't summarize before you speak."
+    )

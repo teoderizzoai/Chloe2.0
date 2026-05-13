@@ -315,27 +315,44 @@ def _batch_build_memories(
     metas: list[dict],
     distances: list[float],
 ) -> list[Memory]:
-    """Batch SQLite fetch for all IDs, then apply compound scoring."""
+    """Batch SQLite fetch for all IDs, then apply compound scoring.
+
+    Superseded memories (superseded_by IS NOT NULL) are silently excluded —
+    they represent corrected facts and should not surface in retrieval.
+
+    Reference tracking: bumps reference_count and last_referenced_at for every
+    returned memory so frequently-surfaced memories can receive a small score
+    bonus (+0.03 when reference_count > 3).
+    """
     if not ids:
         return []
     conn = get_connection()
     placeholders = ",".join("?" * len(ids))
     rows = conn.execute(
-        f"SELECT * FROM memories WHERE id IN ({placeholders})", ids
+        f"SELECT * FROM memories WHERE id IN ({placeholders}) AND (superseded_by IS NULL)",
+        ids,
     ).fetchall()
     row_by_id = {row["id"]: row for row in rows}
+
+    # Bump reference tracking for all returned memories in one query
+    returned_ids = list(row_by_id.keys())
+    if returned_ids:
+        _bump_reference_counts(conn, returned_ids)
 
     results: list[Memory] = []
     for mem_id, meta, dist in zip(ids, metas, distances):
         cosine = 1.0 / (1.0 + dist)
         row = row_by_id.get(mem_id)
         if row is None:
-            results.append(Memory(id=mem_id, kind=meta.get("kind", "episodic"),
-                                  text="", score=cosine))
+            # Either not found or superseded — skip silently
             continue
         salience = float(row["salience"] or 0.5)
         created_at = row["created_at"] or ""
+        reference_count = int(row["reference_count"]) if "reference_count" in row.keys() else 0
         score = cosine * salience * _recency_decay(created_at)
+        # Small bonus for memories that keep getting surfaced
+        if reference_count > 3:
+            score += 0.03
         results.append(Memory(
             id=row["id"],
             kind=row["kind"],
@@ -355,6 +372,21 @@ def _batch_build_memories(
             confidential_to=row["confidential_to"] if "confidential_to" in row.keys() else None,
         ))
     return results
+
+
+def _bump_reference_counts(conn, ids: list[int]) -> None:
+    """Increment reference_count and set last_referenced_at for all returned memories."""
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        placeholders = ",".join("?" * len(ids))
+        conn.execute(
+            f"UPDATE memories SET reference_count = reference_count + 1, last_referenced_at = ? "
+            f"WHERE id IN ({placeholders})",
+            [now, *ids],
+        )
+        conn.commit()
+    except Exception:
+        pass
 
 
 def _mmr(candidates: list[Memory], n: int = 8, lambda_: float = 0.6) -> list[Memory]:

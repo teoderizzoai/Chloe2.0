@@ -19,9 +19,11 @@ def tool():
     return SelfToolsTool()
 
 
-def test_all_verbs_are_free(tool):
+def test_all_verbs_have_valid_auth_class(tool):
+    valid_classes = {"free", "intimate", "kinetic", "kinetic-sensitive"}
+    # forget_memory/forget_recent are intentionally intimate (irreversible deletion)
     for verb in tool.verbs.values():
-        assert verb.auth_class == "free", f"{verb.name} is not free"
+        assert verb.auth_class in valid_classes, f"{verb.name} has unknown auth_class {verb.auth_class!r}"
 
 
 def test_parse_until_iso():

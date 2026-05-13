@@ -65,11 +65,24 @@ class SocialMentionItem(BaseModel):
     confidentiality: Literal["public", "relational", "private"] = "relational"
 
 
+class AestheticReaction(BaseModel):
+    stimulus: str = Field(max_length=150, description="What was shared — song title, text excerpt, idea")
+    domain: Literal["music", "language", "image", "idea", "space"] = "music"
+    valence: float = Field(ge=-1.0, le=1.0, default=0.0,
+        description="1=deeply resonant, -1=aversive, 0=neutral")
+    intensity: float = Field(ge=0.0, le=1.0, default=0.5)
+    notes: str = Field(max_length=100, default="")
+    confidentiality: Literal["public", "relational", "private"] = Field(
+        default="public",
+        description="'private' if Teo shared this with an expectation of discretion (e.g. 'that song wrecked me — don't tell anyone'). 'relational' if sensitive but not explicitly private. 'public' otherwise.",
+    )
+
+
 class ExtractOutput(BaseModel):
     salience: float = Field(ge=0.0, le=1.0, default=0.4)
     ambiguity: float = Field(ge=0.0, le=1.0, default=0.2)
     social_mentions: list[SocialMentionItem] = Field(default_factory=list)
-    aesthetic_reactions: list[dict] = Field(default_factory=list)
+    aesthetic_reactions: list[AestheticReaction] = Field(default_factory=list)
     person_valence: float = Field(ge=-1.0, le=1.0, default=0.0,
         description="Teo's apparent emotional valence in this exchange (-1=very negative, 1=very positive)")
     person_arousal: float = Field(ge=0.0, le=1.0, default=0.4,
@@ -187,6 +200,34 @@ class ReflectOutput(BaseModel):
     biased_summary: str = Field(max_length=240, default="")
     new_anticipations: list[ReflectAnticipation] = Field(default_factory=list)
     new_questions: list[ReflectNewQuestion] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Split reflect schemas — two focused Flash calls replace the single 12-field
+# monolith. Run concurrently; each is independently robust against JSON dropout.
+# ---------------------------------------------------------------------------
+
+class ReflectCurrentState(BaseModel):
+    """Fast inner-state pass: what shifted in my felt experience right now."""
+    continuity_note: str = Field(max_length=240, default="",
+        description="One sentence about the through-line of the last 2 hours — a felt sense, not a summary.")
+    new_wants: list[ReflectNewWant] = Field(default_factory=list)
+    new_tensions: list[ReflectNewTension] = Field(default_factory=list)
+    recurring_loops: list[str] = Field(default_factory=list,
+        description="0–2 short strings naming patterns Chloe keeps falling into.")
+    biased_summary: str = Field(max_length=240, default="",
+        description="One sentence: how her current state is coloring how she sees things.")
+    new_anticipations: list[ReflectAnticipation] = Field(default_factory=list)
+    new_questions: list[ReflectNewQuestion] = Field(default_factory=list)
+
+
+class ReflectDevelopmental(BaseModel):
+    """Slower developmental pass: what is genuinely changing in who she is."""
+    new_interests: list[ReflectNewInterest] = Field(default_factory=list)
+    new_goals: list[ReflectNewGoal] = Field(default_factory=list)
+    goal_progress_updates: list[ReflectGoalUpdate] = Field(default_factory=list)
+    new_world_beliefs: list[ReflectNewBelief] = Field(default_factory=list)
+    trait_evidence: list[TraitEvidenceItem] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -322,3 +363,84 @@ class MessageBodyWithDeliberation(BaseModel):
         description="What you almost said but decided against, and why — not sent to Teo, internal scaffolding only.",
     )
     body: str = Field(max_length=500)
+
+
+# ---------------------------------------------------------------------------
+# Pre-generation preflight: runs before Chloe replies.
+# Three jobs: context routing, task/verb detection, memory capture.
+# ---------------------------------------------------------------------------
+
+class PreflightContextSlot(BaseModel):
+    source: str = Field(
+        max_length=120,
+        description=(
+            "Data source to fetch. Formats: 'person:<name>', 'inbox', 'calendar', "
+            "'inner_wants', 'world_beliefs:<topic>', 'memories:<specific query>'. "
+            "Use 'memories:<query>' only when a targeted search would outperform "
+            "the default semantic search on the raw message text."
+        ),
+    )
+    reason: str = Field(max_length=160, default="", description="Why this source is needed to answer the message well.")
+
+
+class PreflightCapture(BaseModel):
+    text: str = Field(max_length=300, description="The fact, event, or preference to remember — one factual line.")
+    kind: Literal["episodic", "semantic"] = Field(
+        default="semantic",
+        description="'semantic' for stable facts/preferences, 'episodic' for things that happened at a specific time.",
+    )
+    tags: list[str] = Field(
+        default_factory=list,
+        description="2–4 short lowercase tags. Include 'person:<name>' when about someone specific.",
+    )
+    salience: float = Field(ge=0.0, le=1.0, default=0.5, description="How important is this to remember (0=trivial, 1=critical).")
+    person_name: str | None = Field(default=None, max_length=80, description="Third-party person this is about, if any.")
+    when_iso: str | None = Field(default=None, max_length=40, description="ISO 8601 datetime if time-bound.")
+    confidentiality: Literal["public", "relational", "private"] = Field(
+        default="public",
+        description=(
+            "'private' if this is something Teo shared in confidence about a third party "
+            "(e.g. 'Marco is struggling'). 'relational' if sensitive but not explicitly private. "
+            "'public' for general facts. Private memories are annotated when retrieved across persons."
+        ),
+    )
+    suggested_action: dict | None = Field(
+        default=None,
+        description="If action-shaped: {tool, verb, args}. E.g. {tool:'calendar', verb:'add_event', args:{...}}. Null otherwise.",
+    )
+    follow_up: str | None = Field(
+        default=None, max_length=200,
+        description="Clarifying question if information is too ambiguous to act on. Null when unambiguous.",
+    )
+
+
+class PreflightOutput(BaseModel):
+    context_slots: list[PreflightContextSlot] = Field(
+        default_factory=list,
+        description="Specific data sources to fetch before generating the reply. Empty for routine small talk.",
+    )
+    requests: list[InterceptRequest] = Field(
+        default_factory=list,
+        description="Things Teo is asking Chloe to do that require a tool verb.",
+    )
+    captures: list[PreflightCapture] = Field(
+        default_factory=list,
+        description="Facts, events, or preferences worth storing in memory.",
+    )
+    message_topic: str = Field(
+        max_length=120, default="",
+        description="One short phrase describing what this message is about (e.g. 'asking about relationship with Zuza', 'sharing dentist appointment').",
+    )
+    salience: float = Field(
+        ge=0.0, le=1.0, default=0.3,
+        description="How emotionally significant or memorable this message is (0.3=routine, 0.7+=important).",
+    )
+    felt_orientation: str | None = Field(
+        default=None,
+        max_length=200,
+        description=(
+            "One short line: Chloe's first felt response to this message — not what she thinks, what she feels. "
+            "E.g. 'something about that question lands differently today' or 'relief — he's back'. "
+            "Null for routine factual queries, instructions, or small talk."
+        ),
+    )

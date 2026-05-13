@@ -37,6 +37,13 @@ class ToolRegistry:
             key = (row["tool"], row["verb"])
             self._dynamic[key] = dict(row)
         log.info("dynamic_verbs_loaded", count=len(self._dynamic))
+        # Invalidate the module-level tool catalog cache in preflight so the
+        # next turn picks up any newly defined or archived verbs.
+        try:
+            from chloe.channels.preflight import invalidate_tool_catalog_cache
+            invalidate_tool_catalog_cache()
+        except Exception:
+            pass
         return len(self._dynamic)
 
     def gemini_tool_declarations(self) -> list[dict]:

@@ -240,6 +240,42 @@ class SelfToolsTool(Tool):
                 description_for_model="Run weekly self-modeling: distill procedural rules from feedback, update identity narrative via pro thinking.",
                 description_for_human="Run weekly self-model",
             ),
+            "forget_memory": ToolVerb(
+                name="forget_memory",
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "memory_id": {"type": "integer", "description": "ID of the memory to delete"},
+                        "reason": {"type": "string", "description": "Why this memory is being deleted (e.g. 'Teo asked me to forget this')"},
+                    },
+                    "required": ["memory_id"],
+                },
+                auth_class="intimate",
+                reversibility=0.0,
+                description_for_model=(
+                    "Permanently delete a specific memory by ID. Use when Teo explicitly asks "
+                    "you to forget something. Irreversible — removes from both SQLite and Chroma."
+                ),
+                description_for_human="Delete a memory permanently",
+            ),
+            "forget_recent": ToolVerb(
+                name="forget_recent",
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "topic": {"type": "string", "description": "Topic or phrase to match — finds the most recent memory containing this text"},
+                        "reason": {"type": "string", "description": "Why this memory is being deleted"},
+                    },
+                    "required": ["topic"],
+                },
+                auth_class="intimate",
+                reversibility=0.0,
+                description_for_model=(
+                    "Find the most recent memory matching a topic and delete it. Use when Teo "
+                    "asks you to forget something without specifying an ID."
+                ),
+                description_for_human="Delete most recent memory matching topic",
+            ),
         }
 
     async def execute(self, verb: str, args: dict) -> ToolResult:
@@ -263,6 +299,10 @@ class SelfToolsTool(Tool):
             return await self._trigger_consolidation()
         elif verb == "trigger_weekly_self_model":
             return await self._trigger_weekly_self_model()
+        elif verb == "forget_memory":
+            return self._forget_memory(args)
+        elif verb == "forget_recent":
+            return self._forget_recent(args)
         return ToolResult(success=False, error=f"Unknown verb: {verb}")
 
     def _set_quiet(self, args: dict) -> ToolResult:
@@ -466,6 +506,52 @@ class SelfToolsTool(Tool):
         except Exception as exc:
             log.error("trigger_weekly_self_model_failed", error=str(exc))
             return ToolResult(success=False, error=str(exc))
+
+    def _forget_memory(self, args: dict) -> ToolResult:
+        memory_id = args.get("memory_id")
+        if not memory_id:
+            return ToolResult(success=False, error="memory_id is required")
+        try:
+            memory_id = int(memory_id)
+        except (TypeError, ValueError):
+            return ToolResult(success=False, error="memory_id must be an integer")
+
+        conn = get_connection()
+        row = conn.execute(
+            "SELECT id, text, kind FROM memories WHERE id=?", (memory_id,)
+        ).fetchone()
+        if not row:
+            return ToolResult(success=False, error=f"Memory {memory_id} not found")
+
+        conn.execute("DELETE FROM memories WHERE id=?", (memory_id,))
+        conn.commit()
+
+        from chloe.memory.store import delete_from_chroma
+        delete_from_chroma(memory_id)
+
+        log.info("memory_deleted", id=memory_id, kind=row["kind"],
+                 reason=args.get("reason", "user request"), text_preview=row["text"][:60])
+        return ToolResult(success=True, data={
+            "deleted_id": memory_id,
+            "kind": row["kind"],
+            "text_preview": row["text"][:80],
+        })
+
+    def _forget_recent(self, args: dict) -> ToolResult:
+        topic = (args.get("topic") or "").strip()
+        if not topic:
+            return ToolResult(success=False, error="topic is required")
+
+        conn = get_connection()
+        row = conn.execute(
+            "SELECT id, text, kind FROM memories WHERE text LIKE ? "
+            "ORDER BY id DESC LIMIT 1",
+            (f"%{topic}%",),
+        ).fetchone()
+        if not row:
+            return ToolResult(success=False, error=f"No memory found containing '{topic}'")
+
+        return self._forget_memory({"memory_id": row["id"], "reason": args.get("reason", "user request")})
 
     def dry_run(self, verb: str, args: dict) -> str:
         if verb == "set_quiet":

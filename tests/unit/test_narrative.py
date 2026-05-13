@@ -26,7 +26,7 @@ def test_append_and_retrieve_entry(db):
         valence=0.6,
         source="test",
     )
-    row = db.execute("SELECT * FROM narrative_timeline WHERE id=?", (entry_id,)).fetchone()
+    row = db.execute("SELECT * FROM narrative_events WHERE id=?", (entry_id,)).fetchone()
     assert row is not None
     assert row["kind"] == "event"
     assert row["valence"] == pytest.approx(0.6)
@@ -43,7 +43,7 @@ def test_get_my_story_excludes_old_entries(db):
     conn = get_connection()
     from chloe.actions.schema import ulid as make_ulid
     conn.execute(
-        "INSERT INTO narrative_timeline (id, kind, title, body, source, created_at)"
+        "INSERT INTO narrative_events (id, kind, title, body, source, created_at)"
         " VALUES (?, 'event', 'Old event', 'This was a long time ago.', 'test', ?)",
         (make_ulid(), old),
     )

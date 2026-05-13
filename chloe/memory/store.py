@@ -32,6 +32,9 @@ def add(
     archived_tier: str = "hot",
     collection_name: str = "memories_v2",
     unprocessed: bool = False,
+    emotional_valence: float | None = None,
+    emotional_arousal: float | None = None,
+    confidential_to: int | None = None,
 ) -> int:
     """Insert into SQLite and ChromaDB. Returns the new memory id.
 
@@ -39,14 +42,22 @@ def add(
     experience: it surfaces in chat context with phrasing like "haven't fully
     worked this out yet" and is excluded from belief / trait formation. The
     weekly review pass decides whether to promote or keep it unprocessed.
+
+    `emotional_valence` and `emotional_arousal` enable mood-congruent retrieval
+    in query_fast — memories whose register aligns with Chloe's current affect
+    score higher. Set these whenever the emotional tone of the content is known.
+
+    `confidential_to` gates display in chat: a memory with confidential_to=pid
+    is annotated "(told in confidence)" when retrieved for other persons.
     """
     conn = get_connection()
     cursor = conn.execute(
         """
         INSERT INTO memories
           (kind, text, source, source_ref, tags, artifact_refs, weight, salience, confidence,
-           archived_tier, unprocessed, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           archived_tier, unprocessed, emotional_valence, emotional_arousal, confidential_to,
+           created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             kind,
@@ -60,6 +71,9 @@ def add(
             confidence,
             archived_tier,
             1 if unprocessed else 0,
+            emotional_valence,
+            emotional_arousal,
+            confidential_to,
             datetime.now(timezone.utc).isoformat(),
             datetime.now(timezone.utc).isoformat(),
         ),
@@ -74,8 +88,42 @@ def add(
         source=source,
         artifact_refs=artifact_refs or [],
         collection_name=collection_name,
+        emotional_valence=emotional_valence,
+        emotional_arousal=emotional_arousal,
     )
     return memory_id
+
+
+def update_memory_affect(
+    memory_id: int,
+    emotional_valence: float,
+    emotional_arousal: float,
+    collection_name: str = "memories_v2",
+) -> None:
+    """Update emotional valence/arousal on an existing memory and re-upsert to Chroma.
+
+    Called from the background extraction pass after person_valence/arousal are
+    known — the chat memory is written first, then enriched with affect metadata.
+    """
+    conn = get_connection()
+    row = conn.execute("SELECT text, kind, source FROM memories WHERE id=?", (memory_id,)).fetchone()
+    if not row:
+        return
+    conn.execute(
+        "UPDATE memories SET emotional_valence=?, emotional_arousal=?, updated_at=? WHERE id=?",
+        (emotional_valence, emotional_arousal, datetime.now(timezone.utc).isoformat(), memory_id),
+    )
+    conn.commit()
+    add_to_chroma(
+        memory_id=memory_id,
+        text=row["text"],
+        kind=row["kind"],
+        source=row["source"],
+        artifact_refs=[],
+        collection_name=collection_name,
+        emotional_valence=emotional_valence,
+        emotional_arousal=emotional_arousal,
+    )
 
 
 def mark_unprocessed(memory_id: int, value: bool = True) -> None:

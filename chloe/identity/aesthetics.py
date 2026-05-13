@@ -27,21 +27,35 @@ def log_reaction(
     valence: float = 0.0,
     intensity: float = 0.5,
     notes: str = "",
+    confidentiality: str = "public",
 ) -> int:
     """Record one aesthetic reaction to a specific stimulus. Returns id."""
     stimulus = stimulus.strip()[:400]
     notes = notes.strip()[:500]
     valence = max(-1.0, min(1.0, valence))
     intensity = max(0.0, min(1.0, intensity))
+    if confidentiality not in ("public", "relational", "private"):
+        confidentiality = "public"
 
     conn = get_connection()
-    cur = conn.execute(
-        """INSERT INTO aesthetic_reactions (stimulus, domain, valence, intensity, notes, created_at)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (stimulus, domain, valence, intensity, notes, datetime.now(timezone.utc).isoformat()),
-    )
+    try:
+        cur = conn.execute(
+            """INSERT INTO aesthetic_reactions
+                   (stimulus, domain, valence, intensity, notes, confidentiality, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (stimulus, domain, valence, intensity, notes, confidentiality,
+             datetime.now(timezone.utc).isoformat()),
+        )
+    except Exception:
+        # Fallback for older DBs that don't have the confidentiality column yet
+        cur = conn.execute(
+            """INSERT INTO aesthetic_reactions (stimulus, domain, valence, intensity, notes, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (stimulus, domain, valence, intensity, notes, datetime.now(timezone.utc).isoformat()),
+        )
     conn.commit()
-    log.info("aesthetic_reaction_logged", id=cur.lastrowid, domain=domain, intensity=intensity)
+    log.info("aesthetic_reaction_logged", id=cur.lastrowid, domain=domain,
+             intensity=intensity, confidentiality=confidentiality)
     return cur.lastrowid
 
 
