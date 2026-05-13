@@ -11,7 +11,9 @@ apt-get update -q
 apt-get install -y -q software-properties-common
 add-apt-repository -y ppa:deadsnakes/ppa
 apt-get update -q
-apt-get install -y -q python3.12 python3.12-venv python3-pip nginx nodejs npm git
+apt-get install -y -q python3.12 python3.12-venv python3-pip nginx git curl
+curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+apt-get install -y -q nodejs
 
 echo "[setup] Cloning repository..."
 git clone "$REPO_URL" "$APP_DIR"
