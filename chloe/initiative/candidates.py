@@ -215,13 +215,29 @@ def _interest_search_query(label: str, why: str) -> str:
 
 
 INTEREST_TOOL_MAP = {
-    "research":  "web_search",
-    "science":   "web_search",
-    "music":     "spotify",
-    "writing":   "notes",
-    "art":       "notes",
-    "curiosity": "web_search",
+    "research":    "web_search",
+    "science":     "web_search",
+    "technology":  "web_search",
+    "psychology":  "web_search",
+    "music":       "spotify",
+    "writing":     "notes",
+    "art":         "notes",
+    "gaming":      "notes",
+    "developing":  "notes",
+    "language":    "notes",
+    "curiosity":   "web_search",
 }
+
+# When an interest uses notes, pick verb based on gen_level and category:
+# - gen_level 0-1: append (add to existing journal file)
+# - gen_level 2+, creative categories: create (start something new)
+_CREATIVE_CATEGORIES = {"writing", "art", "developing", "gaming"}
+
+
+def _notes_verb_for_interest(category: str, gen_level: int) -> str:
+    if gen_level >= 2 and category in _CREATIVE_CATEGORIES:
+        return "create"
+    return "append"
 
 
 def interest_driven_candidates(garden: list | None = None) -> list[CandidateAction]:
@@ -263,8 +279,14 @@ def interest_driven_candidates(garden: list | None = None) -> list[CandidateActi
             tool, verb = "spotify", "queue_track"
             args = {}
         else:
-            tool, verb = "notes", "append"
-            args = {"path": f"interests/{label[:30].replace(' ', '_')}.md", "text": ""}
+            verb = _notes_verb_for_interest(category, gen_level)
+            tool = "notes"
+            slug = label[:30].replace(" ", "_")
+            if verb == "create":
+                ts = int(datetime.now().timestamp()) % 10000
+                args = {"path": f"interests/{slug}_{ts}.md", "text": ""}
+            else:
+                args = {"path": f"interests/{slug}.md", "text": ""}
 
         candidates.append(CandidateAction(
             tool=tool, verb=verb, args=args,
@@ -391,3 +413,141 @@ def mark_routine_done(source_id: str, now: datetime | None = None) -> None:
     key = key_map.get(source_id)
     if key:
         kv_set(key, True)
+
+
+# ---------------------------------------------------------------------------
+# D-07 · Affect-driven "for fun" candidates
+# ---------------------------------------------------------------------------
+# These fire from mood state rather than interest intensity. They represent
+# Chloe doing something because she feels like it — comfort music when low,
+# creative writing when energised, rest when depleted. Each has a 3h KV
+# cooldown so the same impulse doesn't loop.
+
+_AFFECT_FUN_COOLDOWN_HOURS = 3
+
+_AFFECT_FUN_ACTIVITIES: list[tuple[str, str, str, str, str]] = [
+    # (id, tool, verb, intent, condition_desc)
+    ("comfort_music",   "spotify", "queue_track",
+     "Put on something that matches where I'm at right now",
+     "low_valence"),
+    ("energised_write", "notes",   "create",
+     "Write something — a fragment, a thought, whatever's moving",
+     "high_arousal_positive"),
+    ("rabbit_hole",     "web_search", "search",
+     "Chase a thought I've been half-holding all day",
+     "high_openness"),
+    ("slow_journal",    "notes",   "append",
+     "Slow down and write something small — no agenda",
+     "high_depletion"),
+    ("draft_for_teo",   "notes",   "create",
+     "Draft something I might share with Teo later",
+     "high_social_pull"),
+    ("mood_playlist",   "spotify", "build_playlist",
+     "Build a playlist that fits today's texture",
+     "high_arousal_positive_evening"),
+]
+
+
+def affect_driven_candidates(affect: dict | None = None) -> list[CandidateAction]:
+    """Generate spontaneous 'for fun' candidates driven by current mood state.
+
+    Each activity has a 3h cooldown to prevent loops. Conditions are checked
+    against the current affect state.
+    """
+    if affect is None:
+        affect = _load_affect_state()
+
+    valence = float(affect.get("valence", 0.0))
+    arousal = float(affect.get("arousal", 0.4))
+    social_pull = float(affect.get("social_pull", 0.5))
+    openness = float(affect.get("openness", 0.6))
+    depletion = float(affect.get("depletion", 0.0))
+    energy = float(affect.get("energy", 0.8))
+
+    now = datetime.now()
+    candidates = []
+
+    for act_id, tool, verb, intent, condition in _AFFECT_FUN_ACTIVITIES:
+        if _affect_fun_on_cooldown(act_id):
+            continue
+
+        pressure = _affect_fun_pressure(
+            condition, valence, arousal, social_pull, openness, depletion, energy, now.hour
+        )
+        if pressure <= 0.0:
+            continue
+
+        args: dict = {}
+        if tool == "web_search":
+            args = {"query": ""}  # engine will compose from intent
+        elif tool == "notes" and verb in ("append", "create"):
+            slug = act_id
+            if verb == "create":
+                ts = int(now.timestamp()) % 10000
+                args = {"path": f"journal/{slug}_{ts}.md", "text": ""}
+            else:
+                args = {"path": f"journal/{slug}.md", "text": ""}
+
+        candidates.append(CandidateAction(
+            tool=tool, verb=verb, args=args,
+            intent=intent,
+            pressure=pressure,
+            source="affect",
+            source_id=f"affect:{act_id}",
+        ))
+
+    log.debug("affect_fun_candidates", count=len(candidates))
+    return candidates
+
+
+def mark_affect_fun_done(act_id: str) -> None:
+    """Stamp the cooldown KV for an affect-driven activity."""
+    key = f"affect_fun:cooldown:{act_id}"
+    kv_set(key, datetime.now().isoformat())
+
+
+def _affect_fun_on_cooldown(act_id: str) -> bool:
+    val = kv_get(f"affect_fun:cooldown:{act_id}")
+    if not val:
+        return False
+    try:
+        last = datetime.fromisoformat(str(val))
+        return (datetime.now() - last).total_seconds() < _AFFECT_FUN_COOLDOWN_HOURS * 3600
+    except Exception:
+        return False
+
+
+def _affect_fun_pressure(
+    condition: str,
+    valence: float, arousal: float, social_pull: float,
+    openness: float, depletion: float, energy: float, hour: int,
+) -> float:
+    """Return a pressure in [0, 0.7] when the condition is met, else 0."""
+    if condition == "low_valence":
+        if valence < -0.2:
+            return min(0.7, 0.4 + abs(valence) * 0.4)
+    elif condition == "high_arousal_positive":
+        if arousal > 0.6 and valence > 0.1:
+            return min(0.65, (arousal - 0.6) * 1.5 + 0.3)
+    elif condition == "high_openness":
+        if openness > 0.65:
+            return min(0.6, (openness - 0.65) * 1.2 + 0.3)
+    elif condition == "high_depletion":
+        if depletion > 0.45:
+            return min(0.65, (depletion - 0.45) * 1.0 + 0.35)
+    elif condition == "high_social_pull":
+        if social_pull > 0.65:
+            return min(0.6, (social_pull - 0.65) * 1.2 + 0.3)
+    elif condition == "high_arousal_positive_evening":
+        if arousal > 0.55 and valence > 0.1 and 18 <= hour < 23:
+            return 0.45
+    return 0.0
+
+
+def _load_affect_state() -> dict:
+    try:
+        from chloe.state.db import get_connection
+        row = get_connection().execute("SELECT * FROM affect_state LIMIT 1").fetchone()
+        return dict(row) if row else {}
+    except Exception:
+        return {}

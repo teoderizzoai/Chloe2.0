@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from chloe.initiative.candidates import (
     pressure_driven_candidates, goal_driven_candidates,
     interest_driven_candidates, routine_candidates, CandidateAction,
-    mark_routine_done,
+    mark_routine_done, affect_driven_candidates, mark_affect_fun_done,
 )
 from chloe.initiative.share_queue import share_queue_candidates
 from chloe.initiative.curiosity import curiosity_driven_candidates, mark_curiosity_surfaced
@@ -86,16 +86,7 @@ async def tick() -> object | None:
     now = datetime.now()
     threshold = _get_threshold()  # base threshold; per-candidate threshold applied below
 
-    inner_state = _load_inner_state_snapshot()
-    candidates = (
-        pressure_driven_candidates(inner_state)
-        + goal_driven_candidates(inner_state.get("goals"))
-        + interest_driven_candidates(inner_state.get("interests"))
-        + routine_candidates(now)
-        + curiosity_driven_candidates()
-        + share_queue_candidates()
-    )
-
+    # Load affect first — both energy gate and affect-driven candidates need it
     affect = _load_affect()
 
     # Energy exhaustion gate — hard block when energy is critically low
@@ -104,6 +95,18 @@ async def tick() -> object | None:
         log.info("tick_exhausted", energy=round(energy, 3))
         chloe_initiative_ticks_total.labels(outcome="idle").inc()
         return None
+
+    inner_state = _load_inner_state_snapshot()
+    candidates = (
+        pressure_driven_candidates(inner_state)
+        + goal_driven_candidates(inner_state.get("goals"))
+        + interest_driven_candidates(inner_state.get("interests"))
+        + routine_candidates(now)
+        + curiosity_driven_candidates()
+        + share_queue_candidates()
+        + affect_driven_candidates(affect)
+    )
+
     live_buffer.record_affect({
         "valence": affect.get("valence"),
         "arousal": affect.get("arousal"),
@@ -200,10 +203,10 @@ async def tick() -> object | None:
             "error": getattr(result, "error", None),
         })
     finally:
-        # Consume energy whenever an initiative action actually executes.
         if result and result.executed:
             from chloe.affect.vitals import consume_energy
             consume_energy()
+            _record_activity_affect(best)
 
         # Routines mark done regardless — avoids re-firing in the same window.
         # Interests only stamp cooldown when the gate actually ran the action;
@@ -216,6 +219,9 @@ async def tick() -> object | None:
         elif best.source == "curiosity":
             topic = best.source_id.removeprefix("curiosity:")
             mark_curiosity_surfaced(topic)
+        elif best.source == "affect":
+            act_id = best.source_id.removeprefix("affect:")
+            mark_affect_fun_done(act_id)
         elif best.source == "share_queue":
             try:
                 from chloe.initiative.share_queue import mark_shared
@@ -224,6 +230,31 @@ async def tick() -> object | None:
                 pass
 
     return result
+
+
+# Affect deltas written to affect_records after each executed initiative action.
+# Format: (valence_delta, arousal_delta, intensity)
+_ACTIVITY_AFFECT: dict[tuple[str, str], tuple[float, float, float]] = {
+    ("spotify",    "queue_track"):    (+0.10, +0.05, 0.40),
+    ("spotify",    "build_playlist"): (+0.08, +0.03, 0.35),
+    ("web_search", "search"):         (+0.04, +0.10, 0.35),
+    ("notes",      "append"):         (+0.03, -0.05, 0.25),
+    ("notes",      "create"):         (+0.10, +0.05, 0.45),
+    ("messages",   "send_text"):      (+0.07, +0.04, 0.40),
+    ("self_tools", "trigger_consolidation"): (+0.02, -0.08, 0.20),
+}
+
+
+def _record_activity_affect(candidate: "CandidateAction") -> None:
+    """Write an affect_record so the completed activity nudges Chloe's mood."""
+    try:
+        from chloe.inner.residue import record_event
+        key = (candidate.tool, candidate.verb)
+        vd, ad, intensity = _ACTIVITY_AFFECT.get(key, (0.02, 0.0, 0.2))
+        record_event(intensity=intensity, valence_delta=vd, arousal_delta=ad,
+                     trigger=f"{candidate.tool}.{candidate.verb}")
+    except Exception as exc:
+        log.debug("activity_affect_record_failed", error=str(exc))
 
 
 def _mark_interest_attempted(interest_id: str) -> None:

@@ -871,7 +871,15 @@ function Toggle({ checked, onChange }) {
 
 /* ───────────────────────── INNER STATE ───────────────────────── */
 function InnerStateTab({ data }) {
-  const IS = (data.inner_state) || {};
+  const [liveIS, setLiveIS] = React.useState(null);
+  React.useEffect(() => {
+    const base = window.__CHLOE_API_BASE__ || '';
+    fetch(base + '/v1/dashboard/state')
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(d => { if (d.inner_state) setLiveIS(d.inner_state); })
+      .catch(() => {});
+  }, []);
+  const IS = liveIS || (data.inner_state) || {};
   const reflect = IS.reflect || {};
   const kv = IS.kv || {};
 
@@ -1748,8 +1756,9 @@ const INNER_KINDS = [
   { id: "tensions",     label: "Tensions",     url: "/admin/inner/tensions",  textKey: "text",  metaKey: null,     scaleKey: "pressure" },
   { id: "questions",    label: "Questions",    url: "/admin/inner/questions", textKey: "text",  metaKey: "extra",  scaleKey: "pressure" },
   { id: "anticipations",label: "Anticipations",url: "/admin/inner/anticipations", textKey: "text", metaKey: null, scaleKey: "pressure" },
-  { id: "aversions",    label: "Aversions",    url: "/admin/inner/aversions", textKey: "text",  metaKey: null,     scaleKey: null },
-  { id: "ideas",        label: "Ideas",        url: "/admin/inner/ideas",     textKey: "text",  metaKey: null,     scaleKey: null },
+  { id: "aversions",     label: "Aversions",     url: "/admin/inner/aversions",     textKey: "text", metaKey: null,    scaleKey: null },
+  { id: "ideas",         label: "Ideas",         url: "/admin/inner/ideas",         textKey: "text", metaKey: null,    scaleKey: null },
+  { id: "world_beliefs", label: "World Beliefs", url: "/admin/inner/world_beliefs", textKey: "text", metaKey: "extra", scaleKey: "pressure" },
 ];
 
 function AdminInnerState() {

@@ -657,14 +657,15 @@ async def delete_interest(interest_id: int) -> dict:
 # ── Inner state (goals, wants, fears, tensions, questions, anticipations, aversions, ideas) ───
 
 _INNER_TABLES: dict[str, tuple[str, str]] = {
-    "goals":        ("inner_goals",        "id, name AS text, why, progress, status AS extra"),
-    "wants":        ("inner_wants",        "id, text, subtype AS extra, pressure, resolved"),
-    "fears":        ("inner_fears",        "id, text, '' AS extra, pressure, resolved"),
-    "tensions":     ("inner_tensions",     "id, text, '' AS extra, pressure, resolved"),
-    "questions":    ("inner_questions",    "id, text, domain AS extra, intensity AS pressure, resolved"),
-    "anticipations":("inner_anticipations","id, text, '' AS extra, intensity AS pressure, resolved"),
-    "aversions":    ("inner_aversions",    "id, text, '' AS extra, 0.0 AS pressure, resolved"),
-    "ideas":        ("ideas",              "id, text, '' AS extra, 0.0 AS pressure, complete AS resolved"),
+    "goals":         ("inner_goals",        "id, name AS text, why, progress, status AS extra"),
+    "wants":         ("inner_wants",        "id, text, subtype AS extra, pressure, resolved"),
+    "fears":         ("inner_fears",        "id, text, '' AS extra, pressure, resolved"),
+    "tensions":      ("inner_tensions",     "id, text, '' AS extra, pressure, resolved"),
+    "questions":     ("inner_questions",    "id, text, domain AS extra, intensity AS pressure, resolved"),
+    "anticipations": ("inner_anticipations","id, text, '' AS extra, intensity AS pressure, resolved"),
+    "aversions":     ("inner_aversions",    "id, text, '' AS extra, 0.0 AS pressure, resolved"),
+    "ideas":         ("ideas",              "id, text, '' AS extra, 0.0 AS pressure, complete AS resolved"),
+    "world_beliefs": ("world_beliefs",      "id, belief AS text, topic AS extra, confidence AS pressure, 0 AS resolved"),
 }
 
 

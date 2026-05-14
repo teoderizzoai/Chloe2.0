@@ -42,12 +42,12 @@ def tick(
     hour: int | None = None,
     recent_records: list | None = None,
     last_chat_seen: str | None = None,
+    residue: dict | None = None,
 ) -> AffectState:
     if random.random() < 0.05:
         return state
 
     hour = hour if hour is not None else datetime.now().hour
-    records = recent_records or []
 
     v = state.valence
     a = state.arousal
@@ -64,15 +64,10 @@ def tick(
         a -= 0.02
         sp -= 0.01
 
-    # Residue from recent affect records
-    for rec in records:
-        vd = getattr(rec, "valence_delta", None)
-        ad = getattr(rec, "arousal_delta", None)
-        res = getattr(rec, "residue", 0.0)
-        if vd is not None:
-            v += vd * res
-        if ad is not None:
-            a += ad * res
+    # Residue from recent activity affect records (pre-computed, passed in)
+    if residue:
+        v += residue.get("valence", 0.0) * 0.15
+        a += residue.get("arousal", 0.0) * 0.15
 
     # Mean-reversion toward baseline
     v += (0.0 - v) * 0.02
@@ -92,7 +87,8 @@ def tick(
         except Exception:
             pass
 
-    return AffectState(valence=v, arousal=a, social_pull=sp, openness=op, depletion=dp).clamp()
+    return AffectState(valence=v, arousal=a, social_pull=sp, openness=op, depletion=dp,
+                       energy=state.energy).clamp()
 
 
 def load() -> AffectState:
