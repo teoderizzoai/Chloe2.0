@@ -61,11 +61,13 @@ async def reflect_loop():
 
 
 async def pressure_loop():
-    """Pressure decay loop — sweeps inner_* tables every 10 minutes."""
+    """Pressure decay and vitals loop — sweeps every 10 minutes."""
     from chloe.inner.pressure import decay_all_pressures
+    from chloe.affect.vitals import tick_vitals
     while True:
         try:
             decay_all_pressures()
+            tick_vitals()
         except Exception as e:
             log.warning("pressure_decay_error", error=str(e))
         await asyncio.sleep(600)

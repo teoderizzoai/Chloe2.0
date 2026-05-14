@@ -459,8 +459,62 @@ async def _extract_and_process_mentions(user_text: str, reply: str, person_id: s
         except Exception:
             pass
 
+        # Resolve open questions when Teo's message appears to answer them.
+        # Uses word-overlap heuristic — no extra LLM call needed.
+        try:
+            _resolve_questions_from_turn(user_text, person_id)
+        except Exception as exc:
+            log.warning("question_resolution_failed", error=str(exc))
+
     except Exception as exc:
         log.warning("mention_extraction_failed", error=str(exc))
+
+
+_Q_STOPWORDS = {
+    "a", "an", "the", "of", "in", "on", "at", "to", "for", "and", "or", "is",
+    "are", "was", "be", "been", "being", "it", "its", "that", "this", "with",
+    "by", "from", "as", "what", "how", "which", "his", "her", "their", "he",
+    "she", "they", "you", "your", "i", "me", "my", "we", "our", "do", "did",
+    "does", "has", "have", "had", "s",
+}
+
+
+def _resolve_questions_from_turn(user_text: str, person_id: str) -> None:
+    """Mark inner_questions resolved when Teo's message appears to answer them.
+
+    Heuristic: tokenise both the question and user_text, remove stopwords,
+    require ≥3 overlapping content words and overlap ≥ 40% of the question's
+    keywords. Domain='teo' questions only — 'self'/'world' questions need
+    richer context to resolve.
+    """
+    from chloe.state.db import get_connection
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT id, text FROM inner_questions WHERE resolved=0 AND domain='teo'"
+    ).fetchall()
+    if not rows:
+        return
+
+    user_words = {w for w in user_text.lower().split() if w not in _Q_STOPWORDS and len(w) > 2}
+    if not user_words:
+        return
+
+    resolved_ids = []
+    for row in rows:
+        q_words = {w for w in row["text"].lower().split() if w not in _Q_STOPWORDS and len(w) > 2}
+        if not q_words:
+            continue
+        overlap = len(q_words & user_words)
+        if overlap >= 3 and overlap / len(q_words) >= 0.4:
+            resolved_ids.append(row["id"])
+
+    if resolved_ids:
+        conn.executemany(
+            "UPDATE inner_questions SET resolved=1 WHERE id=?",
+            [(rid,) for rid in resolved_ids],
+        )
+        conn.commit()
+        log.info("questions_resolved_from_chat", ids=resolved_ids, person_id=person_id)
 
 
 def _worth_witnessing(exchange: str, salience: float, ambiguity: float) -> bool:

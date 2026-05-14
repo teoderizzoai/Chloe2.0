@@ -240,45 +240,24 @@ textarea { resize: vertical; }
 /* Subtle leading dot for "she's been…" lines */
 .bullet::before { content: "·"; margin-right: 8px; color: var(--ink-mute); }
 
-/* Avatar — watercolour circle, monogram + leaf */
+/* Avatar — portrait circle */
 .avatar {
   width: 240px; height: 240px; border-radius: 50%;
-  background:
-    radial-gradient(circle at 35% 32%, oklch(0.95 0.04 75) 0%, oklch(0.86 0.07 60) 38%, oklch(0.72 0.10 50) 70%, oklch(0.58 0.10 35) 100%);
   position: relative;
   display: grid; place-items: center;
   box-shadow: 0 1px 0 var(--rule-soft), 0 30px 50px -28px oklch(0.3 0.08 40 / 0.35);
   overflow: hidden;
   isolation: isolate;
+  background: oklch(0.95 0.02 60);
 }
-.avatar::before {
-  content: ""; position: absolute; inset: 0; border-radius: 50%;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240' viewBox='0 0 240 240'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.7' numOctaves='2' seed='9'/></filter><rect width='100%25' height='100%25' filter='url(%23n)' opacity='0.7'/></svg>");
-  mix-blend-mode: overlay; opacity: 0.5;
+.avatar-img {
+  width: 100%; height: 100%;
+  object-fit: cover; object-position: center top;
+  display: block;
 }
-.avatar .mono-c {
-  font-family: 'Newsreader', serif; font-style: italic; font-weight: 500;
-  font-size: 130px; line-height: 1; color: oklch(0.22 0.04 30);
-  text-shadow: 0 1px 0 oklch(1 0 0 / 0.25);
-  z-index: 1;
-  letter-spacing: -0.02em;
-}
-.avatar .leaf {
-  position: absolute; right: 14%; bottom: 12%; width: 32px; height: 32px; z-index: 2;
-  color: oklch(0.45 0.08 145); opacity: 0.85;
-}
-[data-theme="dark"] .avatar {
-  background: radial-gradient(circle at 35% 32%, oklch(0.55 0.05 60) 0%, oklch(0.42 0.06 45) 40%, oklch(0.30 0.05 35) 75%, oklch(0.20 0.03 30) 100%);
-}
-[data-theme="dark"] .avatar .mono-c { color: oklch(0.92 0.04 75); }
 
 .avatar.sm { width: 64px; height: 64px; }
-.avatar.sm .mono-c { font-size: 36px; }
-.avatar.sm .leaf { width: 14px; height: 14px; right: 14%; bottom: 12%; }
-
 .avatar.xs { width: 40px; height: 40px; }
-.avatar.xs .mono-c { font-size: 22px; }
-.avatar.xs .leaf { display: none; }
 
 /* Status strip under avatar */
 .status-line { font-style: italic; color: var(--ink-soft); font-size: 18px; line-height: 1.5; text-wrap: pretty; }

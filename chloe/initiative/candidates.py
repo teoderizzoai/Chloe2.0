@@ -287,8 +287,8 @@ def _load_interests() -> list[dict]:
     from chloe.state.db import get_connection
     from datetime import datetime, timedelta
     conn = get_connection()
-    # 2h cooldown: skip interests attempted (or acted on) in the last 2 hours.
-    cutoff = (datetime.utcnow() - timedelta(hours=2)).isoformat()
+    # 12h cooldown: each interest explored at most twice per day.
+    cutoff = (datetime.utcnow() - timedelta(hours=12)).isoformat()
     rows = conn.execute(
         "SELECT id, label, why, intensity, gen_level, last_engaged_at "
         "FROM interest_garden "

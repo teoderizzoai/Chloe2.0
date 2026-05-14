@@ -138,6 +138,41 @@ LOOSELY_HELD_THRESHOLD = 0.5
 CONFIRMATION_BUMP = 0.08
 
 
+_STOPWORDS = {
+    "a", "an", "the", "of", "in", "on", "at", "to", "for", "and", "or", "is",
+    "are", "was", "be", "been", "being", "it", "its", "that", "this", "with",
+    "by", "from", "as", "my", "me", "i", "when", "how", "what", "which",
+}
+
+
+def _topic_words(text: str) -> set[str]:
+    return {w for w in text.lower().split() if w not in _STOPWORDS and len(w) > 2}
+
+
+def _normalize_topic(topic: str, conn) -> str:
+    """Return the closest existing topic if word-overlap is high enough, else return topic unchanged."""
+    existing_topics = [
+        r["topic"] for r in conn.execute("SELECT topic FROM world_beliefs").fetchall()
+    ]
+    new_words = _topic_words(topic)
+    if not new_words:
+        return topic
+    best_topic, best_score = topic, 0.0
+    for existing in existing_topics:
+        ex_words = _topic_words(existing)
+        if not ex_words:
+            continue
+        overlap = len(new_words & ex_words)
+        score = overlap / min(len(new_words), len(ex_words))
+        if score > best_score:
+            best_score = score
+            best_topic = existing
+    if best_score >= 0.5:
+        log.info("belief_topic_normalized", original=topic, remapped_to=best_topic, score=round(best_score, 2))
+        return best_topic
+    return topic
+
+
 async def store_new_belief(
     topic: str,
     belief: str,
@@ -160,6 +195,12 @@ async def store_new_belief(
     belief = belief.strip()
     if not topic or not belief:
         return None
+
+    # Fuzzy topic normalization: if the incoming topic is semantically close to an
+    # existing one (word-overlap ≥ 0.5 of the shorter topic's words, ignoring
+    # stopwords), remap to the existing topic so confirmation bumps it rather than
+    # spawning a near-duplicate sibling.
+    topic = _normalize_topic(topic, conn)
 
     existing_same = conn.execute(
         "SELECT id, confidence, confirmation_count FROM world_beliefs WHERE topic=?", (topic,)

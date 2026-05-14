@@ -24,6 +24,7 @@ class AffectState:
     social_pull: float = 0.5  # [0, 1]
     openness: float = 0.6     # [0, 1]
     depletion: float = 0.0    # [0, 1] — accumulates from intensive conversations, slow decay
+    energy: float = 0.8       # [0, 1] — initiative fuel; restored by sleep, consumed by actions
 
     def clamp(self) -> "AffectState":
         self.valence = max(-1.0, min(1.0, self.valence))
@@ -31,6 +32,7 @@ class AffectState:
         self.social_pull = max(0.0, min(1.0, self.social_pull))
         self.openness = max(0.0, min(1.0, self.openness))
         self.depletion = max(0.0, min(1.0, self.depletion))
+        self.energy = max(0.0, min(1.0, self.energy))
         return self
 
 
@@ -96,7 +98,7 @@ def tick(
 def load() -> AffectState:
     conn = get_connection()
     row = conn.execute(
-        "SELECT valence, arousal, social_pull, openness, depletion FROM affect_state WHERE id = 1"
+        "SELECT valence, arousal, social_pull, openness, depletion, energy FROM affect_state WHERE id = 1"
     ).fetchone()
     if row is None:
         return AffectState()
@@ -106,6 +108,7 @@ def load() -> AffectState:
         social_pull=row["social_pull"],
         openness=row["openness"],
         depletion=float(row["depletion"] or 0.0),
+        energy=float(row["energy"] if row["energy"] is not None else 0.8),
     )
 
 
@@ -113,14 +116,15 @@ def save(state: AffectState) -> None:
     conn = get_connection()
     conn.execute(
         """
-        INSERT INTO affect_state (id, valence, arousal, social_pull, openness, depletion, updated_at)
-        VALUES (1, ?, ?, ?, ?, ?, ?)
+        INSERT INTO affect_state (id, valence, arousal, social_pull, openness, depletion, energy, updated_at)
+        VALUES (1, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             valence = excluded.valence,
             arousal = excluded.arousal,
             social_pull = excluded.social_pull,
             openness = excluded.openness,
             depletion = excluded.depletion,
+            energy = excluded.energy,
             updated_at = excluded.updated_at
         """,
         (
@@ -129,6 +133,7 @@ def save(state: AffectState) -> None:
             state.social_pull,
             state.openness,
             state.depletion,
+            state.energy,
             datetime.now(timezone.utc).isoformat(),
         ),
     )
@@ -182,6 +187,8 @@ def _heuristic_felt_state(state: AffectState) -> str:
     a = state.arousal
     sp = state.social_pull
 
+    if state.energy < 0.2:
+        return "somewhere between rest and absence, not fully back yet"
     if v > 0.5 and a > 0.6:
         return "something moving faster than usual, in a good way"
     if v > 0.3 and sp > 0.6:
@@ -215,7 +222,9 @@ def tone_block(affect: AffectState) -> str:
     elif affect.valence < -0.3:
         lines.append("Carrying something; not heavy, just present and not yet put down.")
 
-    if affect.arousal > 0.7:
+    if affect.energy < 0.2:
+        lines.append("Somewhere between rest and absence — not quite back yet, running on fumes.")
+    elif affect.arousal > 0.7:
         lines.append("Moving faster inside than out — attention sharpened, things clicking.")
     elif affect.arousal < 0.2:
         if affect.depletion > 0.4:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from chloe.initiative.candidates import (
     pressure_driven_candidates, goal_driven_candidates,
@@ -14,6 +14,7 @@ from chloe.actions.budget import throttle_level
 from chloe.actions.audit import recent as audit_recent
 from chloe.actions.gate import submit as gate_submit
 from chloe.actions.schema import Action
+from chloe.affect.vitals import is_sleep_window
 from chloe.config import get_settings
 from chloe.state.kv import get as kv_get, set as kv_set
 from chloe.observability.logging import get_logger
@@ -76,6 +77,12 @@ async def tick() -> object | None:
     from chloe.identity.interest_garden import drain_pending_curiosity_questions
     await drain_pending_curiosity_questions()
 
+    # Sleep gate — no initiative during the sleep window
+    if is_sleep_window(datetime.now(timezone.utc)):
+        log.debug("tick_sleeping")
+        chloe_initiative_ticks_total.labels(outcome="idle").inc()
+        return None
+
     now = datetime.now()
     threshold = _get_threshold()  # base threshold; per-candidate threshold applied below
 
@@ -90,6 +97,13 @@ async def tick() -> object | None:
     )
 
     affect = _load_affect()
+
+    # Energy exhaustion gate — hard block when energy is critically low
+    energy = float(affect.get("energy", 0.8))
+    if energy < 0.15:
+        log.info("tick_exhausted", energy=round(energy, 3))
+        chloe_initiative_ticks_total.labels(outcome="idle").inc()
+        return None
     live_buffer.record_affect({
         "valence": affect.get("valence"),
         "arousal": affect.get("arousal"),
@@ -157,6 +171,13 @@ async def tick() -> object | None:
             return None
         action.args["body"] = body
 
+    if action.tool == "notes" and action.verb == "append" and not action.args.get("text", "").strip():
+        note_text = await _compose_interest_note(best, inner_state, affect, now)
+        if not note_text:
+            log.warning("tick_interest_note_compose_failed", intent=best.intent)
+            return None
+        action.args["text"] = note_text
+
     # Budget gate: interest-driven web searches capped at 3/day.
     if best.tool == "web_search" and best.source == "interest":
         if _web_search_budget_remaining() <= 0:
@@ -179,11 +200,19 @@ async def tick() -> object | None:
             "error": getattr(result, "error", None),
         })
     finally:
-        # Mark source done regardless of gate outcome or exception.
+        # Consume energy whenever an initiative action actually executes.
+        if result and result.executed:
+            from chloe.affect.vitals import consume_energy
+            consume_energy()
+
+        # Routines mark done regardless — avoids re-firing in the same window.
+        # Interests only stamp cooldown when the gate actually ran the action;
+        # leash suppression (quiet_hours, away_mode) should not consume the cooldown.
         if best.source == "routine":
             mark_routine_done(best.source_id, now)
         elif best.source == "interest":
-            _mark_interest_attempted(best.source_id)
+            if action.state != "suppressed_by_leash":
+                _mark_interest_attempted(best.source_id)
         elif best.source == "curiosity":
             topic = best.source_id.removeprefix("curiosity:")
             mark_curiosity_surfaced(topic)
@@ -218,7 +247,9 @@ def _score_candidate(c: CandidateAction, opp, recent: list, now: datetime, affec
     time_b = _time_bonus(c, now)
     headroom = max(0.0, 1.0 - throttle_level())
     affect_amp = _affect_alignment(c, affect)
-    return c.pressure * tool_opp * recency * time_b * headroom * affect_amp
+    # Routines (check-ins, consolidation) fire regardless of energy level.
+    energy_amp = 1.0 if getattr(c, "source", "") == "routine" else float(affect.get("energy", 0.8))
+    return c.pressure * tool_opp * recency * time_b * headroom * affect_amp * energy_amp
 
 
 def _recency_penalty(c: CandidateAction, recent: list, now: datetime) -> float:
@@ -332,6 +363,64 @@ async def _compose_message_body(action: Action, inner_state: dict, affect: dict)
     except Exception as exc:
         log.warning("compose_message_failed", error=str(exc))
         return None
+
+
+async def _compose_interest_note(
+    candidate: "CandidateAction",
+    inner_state: dict,
+    affect: dict,
+    now: datetime,
+) -> str | None:
+    """Call Flash to write actual journal content for an interest notes.append action."""
+    from chloe.llm.gemini import get_client as get_llm, _render_prompt
+    from chloe.state.db import get_connection
+
+    interest_id = candidate.source_id
+    try:
+        row = get_connection().execute(
+            "SELECT label, why, gen_level FROM interest_garden WHERE id=?", (interest_id,)
+        ).fetchone()
+    except Exception:
+        row = None
+
+    label = (dict(row)["label"] if row else None) or candidate.intent.removeprefix("Explore my interest in ")
+    why_raw = (dict(row)["why"] if row else "") or ""
+    gen_level = int((dict(row)["gen_level"] if row else None) or 0)
+
+    gen_level_desc = {
+        0: "just noticed — a first impression, not yet a real interest",
+        1: "encountered a few times — starting to feel like something",
+        2: "recognizable interest — I return to this on my own",
+        3: "deep interest — part of how I think",
+    }.get(gen_level, "emerging")
+
+    # Strip category prefix from why, e.g. "[music] ..."
+    if why_raw.startswith("[") and "]" in why_raw:
+        why = why_raw[why_raw.index("]") + 1:].strip()
+    else:
+        why = why_raw
+
+    context = {
+        "label": label,
+        "why": why or "not sure yet",
+        "time_of_day": now.strftime("%H:%M"),
+        "day_of_week": now.strftime("%A"),
+        "affect_label": affect.get("label", "neutral"),
+        "gen_level_desc": gen_level_desc,
+    }
+
+    llm = get_llm()
+    try:
+        text = await llm.flash_text(
+            _render_prompt("compose_interest_note.md", context),
+            max_output_tokens=300,
+        )
+        if text:
+            timestamp = now.strftime("\n\n--- %Y-%m-%dT%H:%M ---\n")
+            return timestamp + text.strip()
+    except Exception as exc:
+        log.warning("compose_interest_note_failed", error=str(exc))
+    return None
 
 
 def realize(candidate: CandidateAction, now: datetime | None = None) -> Action:

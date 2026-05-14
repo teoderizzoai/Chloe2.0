@@ -23,8 +23,9 @@ def _neutral_opp():
     )
 
 
-def _patch_engine_deps(monkeypatch, pressure_candidates, *, mutex=False, gate=None):
+def _patch_engine_deps(monkeypatch, pressure_candidates, *, mutex=False, gate=None, sleeping=False, energy=0.8):
     """Patch all engine dependencies for isolation."""
+    monkeypatch.setattr("chloe.initiative.engine.is_sleep_window", lambda now: sleeping)
     monkeypatch.setattr("chloe.initiative.engine.pressure_driven_candidates", lambda s: pressure_candidates)
     monkeypatch.setattr("chloe.initiative.engine.goal_driven_candidates", lambda g: [])
     monkeypatch.setattr("chloe.initiative.engine.interest_driven_candidates", lambda g: [])
@@ -34,7 +35,7 @@ def _patch_engine_deps(monkeypatch, pressure_candidates, *, mutex=False, gate=No
     monkeypatch.setattr("chloe.initiative.engine.get_opportunity_vector", AsyncMock(return_value=_neutral_opp()))
     monkeypatch.setattr("chloe.initiative.engine.throttle_level", lambda: 0.0)
     monkeypatch.setattr("chloe.initiative.engine._load_inner_state_snapshot", lambda: {"goals": [], "interests": []})
-    monkeypatch.setattr("chloe.initiative.engine._load_affect", lambda: {})
+    monkeypatch.setattr("chloe.initiative.engine._load_affect", lambda: {"energy": energy})
     monkeypatch.setattr("chloe.initiative.engine.audit_recent", AsyncMock(return_value=[]))
     monkeypatch.setattr("chloe.initiative.engine._get_threshold", lambda c=None: 0.35)
     monkeypatch.setattr("chloe.initiative.engine._tool_mutex_active", lambda t: mutex)
@@ -65,6 +66,41 @@ async def test_tick_mutex_blocks_action(monkeypatch):
     mock_gate = AsyncMock(return_value=MagicMock(executed=True))
     _patch_engine_deps(monkeypatch, [_make_candidate(tool="messages", pressure=0.9)],
                        mutex=True, gate=mock_gate)
+
+    result = await tick()
+    assert result is None
+    mock_gate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_tick_sleeping_returns_none(monkeypatch):
+    mock_gate = AsyncMock(return_value=MagicMock(executed=True))
+    _patch_engine_deps(monkeypatch, [_make_candidate(pressure=0.9)],
+                       gate=mock_gate, sleeping=True)
+
+    result = await tick()
+    assert result is None
+    mock_gate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_tick_exhausted_returns_none(monkeypatch):
+    mock_gate = AsyncMock(return_value=MagicMock(executed=True))
+    _patch_engine_deps(monkeypatch, [_make_candidate(pressure=0.9)],
+                       gate=mock_gate, energy=0.10)
+
+    result = await tick()
+    assert result is None
+    mock_gate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_tick_low_energy_suppresses_non_routine(monkeypatch):
+    """Low energy reduces non-routine candidate scores below threshold."""
+    mock_gate = AsyncMock(return_value=MagicMock(executed=True))
+    # pressure-source candidate with energy=0.2 → score scaled down below threshold
+    _patch_engine_deps(monkeypatch, [_make_candidate(pressure=0.5, source="pressure")],
+                       gate=mock_gate, energy=0.2)
 
     result = await tick()
     assert result is None

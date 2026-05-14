@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 
 import httpx
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 
@@ -630,3 +630,63 @@ async def re_extract_onboarding() -> dict:
 async def _run_onboarding_extraction(qa_text: str, conn) -> dict:
     from chloe.identity.onboarding import run_extraction
     return await run_extraction(qa_text, conn)
+
+
+# ── Interest garden ───────────────────────────────────────────────────────────
+
+@admin_router.get("/interests")
+async def list_interests() -> dict:
+    from chloe.state.db import get_connection
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT id, label, why, intensity, last_engaged_at FROM interest_garden ORDER BY intensity DESC"
+    ).fetchall()
+    return {"interests": [dict(r) for r in rows]}
+
+
+@admin_router.delete("/interests/{interest_id}")
+async def delete_interest(interest_id: int) -> dict:
+    from chloe.state.db import get_connection
+    conn = get_connection()
+    conn.execute("DELETE FROM interest_garden WHERE id = ?", (interest_id,))
+    conn.commit()
+    log.info("interest_deleted", id=interest_id)
+    return {"deleted": interest_id}
+
+
+# ── Inner state (goals, wants, fears, tensions, questions, anticipations, aversions, ideas) ───
+
+_INNER_TABLES: dict[str, tuple[str, str]] = {
+    "goals":        ("inner_goals",        "id, name AS text, why, progress, status AS extra"),
+    "wants":        ("inner_wants",        "id, text, subtype AS extra, pressure, resolved"),
+    "fears":        ("inner_fears",        "id, text, '' AS extra, pressure, resolved"),
+    "tensions":     ("inner_tensions",     "id, text, '' AS extra, pressure, resolved"),
+    "questions":    ("inner_questions",    "id, text, domain AS extra, intensity AS pressure, resolved"),
+    "anticipations":("inner_anticipations","id, text, '' AS extra, intensity AS pressure, resolved"),
+    "aversions":    ("inner_aversions",    "id, text, '' AS extra, 0.0 AS pressure, resolved"),
+    "ideas":        ("ideas",              "id, text, '' AS extra, 0.0 AS pressure, complete AS resolved"),
+}
+
+
+@admin_router.get("/inner/{kind}")
+async def list_inner_state(kind: str) -> dict:
+    if kind not in _INNER_TABLES:
+        raise HTTPException(404, "unknown inner state kind")
+    from chloe.state.db import get_connection
+    table, cols = _INNER_TABLES[kind]
+    conn = get_connection()
+    rows = conn.execute(f"SELECT {cols} FROM {table} ORDER BY id DESC").fetchall()  # noqa: S608
+    return {"kind": kind, "items": [dict(r) for r in rows]}
+
+
+@admin_router.delete("/inner/{kind}/{item_id}")
+async def delete_inner_state(kind: str, item_id: int) -> dict:
+    if kind not in _INNER_TABLES:
+        raise HTTPException(404, "unknown inner state kind")
+    from chloe.state.db import get_connection
+    table, _ = _INNER_TABLES[kind]
+    conn = get_connection()
+    conn.execute(f"DELETE FROM {table} WHERE id = ?", (item_id,))  # noqa: S608
+    conn.commit()
+    log.info("inner_state_deleted", kind=kind, id=item_id)
+    return {"deleted": item_id, "kind": kind}
