@@ -376,6 +376,7 @@ async def delete_memory(memory_id: int) -> dict:
     from chloe.state.db import get_connection
     from chloe.memory.store import delete_from_chroma
     conn = get_connection()
+    conn.execute("UPDATE actions SET becomes_memory_id = NULL WHERE becomes_memory_id = ?", (memory_id,))
     conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
     conn.commit()
     delete_from_chroma(memory_id)
