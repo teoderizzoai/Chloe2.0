@@ -633,6 +633,20 @@ async def _run_onboarding_extraction(qa_text: str, conn) -> dict:
     return await run_extraction(qa_text, conn)
 
 
+# ── Vitals history ───────────────────────────────────────────────────────────
+
+@admin_router.get("/vitals/history")
+async def vitals_history(hours: int = Query(24, le=168)) -> dict:
+    from chloe.state.db import get_connection
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT energy, valence, arousal, social_pull, openness, created_at "
+        "FROM vitals_log WHERE created_at > datetime('now', ? || ' hours') ORDER BY created_at ASC",
+        (f"-{hours}",),
+    ).fetchall()
+    return {"hours": hours, "points": [dict(r) for r in rows]}
+
+
 # ── Interest garden ───────────────────────────────────────────────────────────
 
 @admin_router.get("/interests")

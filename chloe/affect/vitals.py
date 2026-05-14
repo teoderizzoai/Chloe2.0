@@ -54,6 +54,22 @@ def consume_energy(cost: float = _ACTION_ENERGY_COST) -> None:
               after=round(state.energy, 3))
 
 
+def log_snapshot() -> None:
+    """Write the current affect + vitals to vitals_log. Called after each pressure tick."""
+    try:
+        from chloe.state.db import get_connection
+        state = load_affect()
+        conn = get_connection()
+        conn.execute(
+            "INSERT INTO vitals_log (energy, valence, arousal, social_pull, openness) VALUES (?,?,?,?,?)",
+            (round(state.energy, 4), round(state.valence, 4),
+             round(state.arousal, 4), round(state.social_pull, 4), round(state.openness, 4)),
+        )
+        conn.commit()
+    except Exception as exc:
+        log.debug("vitals_log_failed", error=str(exc))
+
+
 def is_sleep_window(now: datetime) -> bool:
     """True if the current UTC time falls within the configured sleep window."""
     try:

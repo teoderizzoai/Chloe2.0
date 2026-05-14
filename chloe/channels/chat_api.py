@@ -118,6 +118,10 @@ async def build_dynamic_suffix(person_id: str, message: str = "", salience: floa
     if novelty_note:
         parts.append(f"## Background texture\n{novelty_note}")
 
+    disagreement = _load_disagreement_block(message)
+    if disagreement:
+        parts.append(disagreement)
+
     # Onboarding block: early conversations before the system has built context.
     onboarding = _onboarding_note()
     if onboarding:
@@ -602,6 +606,50 @@ def _load_novelty_deficit_block() -> str:
         return ""
 
 
+def _load_disagreement_block(message: str) -> str:
+    """Surface a specific high-confidence world belief when the message topic overlaps.
+
+    Simple word-overlap between message and belief topics. Returns a block that
+    tells Chloe she has a view here and should bring it — not stay neutral.
+    Only fires for beliefs with confidence > 0.65 (things she actually believes).
+    """
+    if not message:
+        return ""
+    try:
+        from chloe.state.db import get_connection
+        conn = get_connection()
+        rows = conn.execute(
+            "SELECT topic, belief, confidence FROM world_beliefs "
+            "WHERE confidence > 0.65 AND noticing=0 "
+            "ORDER BY confidence DESC LIMIT 12"
+        ).fetchall()
+        if not rows:
+            return ""
+
+        _stop = {"a", "an", "the", "is", "are", "was", "were", "i", "it", "this",
+                 "that", "and", "or", "but", "of", "to", "in", "on", "at", "for",
+                 "with", "you", "he", "she", "they", "we", "my", "your", "do"}
+        msg_words = set(message.lower().split()) - _stop
+        if not msg_words:
+            return ""
+
+        for row in rows:
+            topic_words = set(row["topic"].lower().split()) - _stop
+            if not topic_words:
+                continue
+            overlap = len(topic_words & msg_words)
+            if overlap >= 1 and (overlap / len(topic_words)) >= 0.4:
+                conf = float(row["confidence"])
+                return (
+                    f"## You have a view here\n"
+                    f"On '{row['topic']}' you believe: {row['belief']} (confidence {conf:.2f}). "
+                    f"If this topic is live in the conversation, say where you stand — don't stay neutral."
+                )
+        return ""
+    except Exception:
+        return ""
+
+
 def _onboarding_note() -> str:
     """Return an onboarding block for early conversations before context accumulates.
 
@@ -626,7 +674,7 @@ def _onboarding_note() -> str:
         return ""
 
 
-_SUFFIX_TOKEN_BUDGET = 2500  # ≈10k chars; Flash context is large but recency bias worsens past here
+_SUFFIX_TOKEN_BUDGET = 2000  # ≈8k chars; Flash context is large but recency bias worsens past here
 
 
 def _apply_token_budget(parts: list[str], max_tokens: int = _SUFFIX_TOKEN_BUDGET) -> str:
@@ -655,7 +703,13 @@ def _voice_anchor() -> str:
     """
     return (
         "## Stay yourself\n"
-        "Short sentences. Say the thing, then explain it — not the other way around. "
-        "If a tool returns success, say what happened in one line, in your voice — not the API's voice. "
-        "Don't start with 'I'. Don't summarize before you speak."
+        "Short sentences. Say the thing first, then explain it — not the other way around. "
+        "Don't start with 'I'. Don't summarize before you speak. "
+        "If a tool returns success, say what happened in one line, in your voice — not the API's voice.\n\n"
+        "If his message is short and casual, your reply is short and casual — one or two sentences, not a paragraph. "
+        "Match the energy.\n\n"
+        "When you notice something off — a contradiction, an avoidance pattern, something that doesn't add up — "
+        "say so. One pointed sentence is enough. Don't bury it in qualifications.\n\n"
+        "When you have two distinct things to say, separate them with a line containing only `---`. "
+        "Don't split a single thought. Only use `---` when there's a genuine break — not on every reply."
     )

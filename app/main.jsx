@@ -2,6 +2,7 @@
 
 const TABS = [
   { id:"now",           label:"Now" },
+  { id:"vitals",        label:"Vitals" },
   { id:"memory",        label:"Memory" },
   { id:"relationships", label:"Relationships" },
   { id:"goals",         label:"Goals" },
@@ -141,6 +142,7 @@ function App() {
       </nav>
 
       {tab === "now"           && <NowTab data={data} />}
+      {tab === "vitals"        && <VitalsTab />}
       {tab === "memory"        && <MemoryTab data={data} />}
       {tab === "relationships" && <RelationshipsTab data={data} />}
       {tab === "goals"         && <GoalsTab data={data} />}

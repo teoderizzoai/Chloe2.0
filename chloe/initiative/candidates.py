@@ -21,6 +21,7 @@ class CandidateAction:
     source: str
     source_id: str
     estimated_cost_usd: float = 0.0
+    gen_level: int = -1  # interest gen_level; -1 = not an interest candidate
 
 
 # ---------------------------------------------------------------------------
@@ -265,10 +266,14 @@ def interest_driven_candidates(garden: list | None = None) -> list[CandidateActi
         preferred_tool = INTEREST_TOOL_MAP.get(category, "web_search")
 
         # Gate: outbound curiosity threads (web_search, spotify discovery)
-        # only fire once the interest has earned gen_level >= 2. Below that,
-        # she has experienced it but not yet generalized it — keep it private.
-        if gen_level < 2 and preferred_tool in ("web_search", "spotify"):
+        # require gen_level >= 1 — at least one prior encounter. gen_level=0
+        # (just noticed, first impression) stays private in notes. gen_level=1
+        # can do one outbound search per day (tracked via KV daily cap).
+        if gen_level == 0 and preferred_tool in ("web_search", "spotify"):
             preferred_tool = "notes"
+        elif gen_level == 1 and preferred_tool == "web_search":
+            if not _gen1_search_available():
+                preferred_tool = "notes"
 
         if preferred_tool == "web_search":
             tool, verb = "web_search", "search"
@@ -294,6 +299,7 @@ def interest_driven_candidates(garden: list | None = None) -> list[CandidateActi
             pressure=pressure,
             source="interest",
             source_id=str(interest.get("id", "")),
+            gen_level=gen_level,
         ))
 
     log.debug(
@@ -319,6 +325,25 @@ def _load_interests() -> list[dict]:
         (cutoff,),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+_GEN1_SEARCH_KEY = "initiative:gen1_search_count:{date}"
+_GEN1_SEARCH_DAILY_CAP = 2
+
+
+def _gen1_search_available() -> bool:
+    """True if the gen_level=1 daily search cap hasn't been reached."""
+    today = datetime.now().date().isoformat()
+    count = kv_get(_GEN1_SEARCH_KEY.format(date=today)) or 0
+    return int(count) < _GEN1_SEARCH_DAILY_CAP
+
+
+def consume_gen1_search_budget() -> None:
+    """Increment the gen_level=1 daily search counter. Called from engine.py."""
+    today = datetime.now().date().isoformat()
+    key = _GEN1_SEARCH_KEY.format(date=today)
+    count = kv_get(key) or 0
+    kv_set(key, int(count) + 1)
 
 
 # ---------------------------------------------------------------------------
@@ -427,24 +452,43 @@ _AFFECT_FUN_COOLDOWN_HOURS = 3
 
 _AFFECT_FUN_ACTIVITIES: list[tuple[str, str, str, str, str]] = [
     # (id, tool, verb, intent, condition_desc)
-    ("comfort_music",   "spotify", "queue_track",
+    ("comfort_music",       "spotify",    "queue_track",
      "Put on something that matches where I'm at right now",
      "low_valence"),
-    ("energised_write", "notes",   "create",
+    ("energised_write",     "notes",      "create",
      "Write something — a fragment, a thought, whatever's moving",
      "high_arousal_positive"),
-    ("rabbit_hole",     "web_search", "search",
+    ("rabbit_hole",         "web_search", "search",
      "Chase a thought I've been half-holding all day",
      "high_openness"),
-    ("slow_journal",    "notes",   "append",
+    ("slow_journal",        "notes",      "append",
      "Slow down and write something small — no agenda",
      "high_depletion"),
-    ("draft_for_teo",   "notes",   "create",
+    ("draft_for_teo",       "notes",      "create",
      "Draft something I might share with Teo later",
      "high_social_pull"),
-    ("mood_playlist",   "spotify", "build_playlist",
+    ("mood_playlist",       "spotify",    "build_playlist",
      "Build a playlist that fits today's texture",
      "high_arousal_positive_evening"),
+    # Extended set — finer-grained conditions
+    ("morning_research",    "web_search", "search",
+     "Follow a thread that's been on my mind since waking",
+     "morning_active"),
+    ("restless_look",       "web_search", "search",
+     "Work off some restless energy — find something worth thinking about",
+     "high_arousal_negative"),
+    ("quiet_listen",        "spotify",    "queue_track",
+     "Put something on low — just to have it in the background",
+     "peaceful"),
+    ("midday_capture",      "notes",      "append",
+     "Catch a thought before the afternoon takes over",
+     "midday_open"),
+    ("evening_reflection",  "notes",      "append",
+     "Write something small before the day closes",
+     "evening_calm"),
+    ("restless_playlist",   "spotify",    "build_playlist",
+     "Build something for this particular restlessness",
+     "high_arousal_negative_evening"),
 ]
 
 
@@ -541,6 +585,25 @@ def _affect_fun_pressure(
     elif condition == "high_arousal_positive_evening":
         if arousal > 0.55 and valence > 0.1 and 18 <= hour < 23:
             return 0.45
+    # Extended conditions
+    elif condition == "morning_active":
+        if 6 <= hour < 10 and energy > 0.6 and arousal > 0.4:
+            return min(0.55, 0.3 + energy * 0.2 + arousal * 0.1)
+    elif condition == "high_arousal_negative":
+        if arousal > 0.65 and valence < -0.15:
+            return min(0.6, (arousal - 0.65) * 1.3 + 0.3)
+    elif condition == "peaceful":
+        if arousal < 0.3 and valence >= 0.0 and depletion < 0.25 and energy > 0.4:
+            return 0.38
+    elif condition == "midday_open":
+        if 11 <= hour < 15 and openness > 0.5 and energy > 0.45:
+            return min(0.5, (openness - 0.5) * 0.9 + 0.3)
+    elif condition == "evening_calm":
+        if 20 <= hour < 23 and arousal < 0.45 and depletion < 0.4:
+            return 0.38
+    elif condition == "high_arousal_negative_evening":
+        if 18 <= hour < 23 and arousal > 0.6 and valence < -0.1:
+            return 0.42
     return 0.0
 
 

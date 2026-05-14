@@ -50,12 +50,24 @@ function ChatDrawer({ userName, open, onClose }) {
               });
             } else if (msg.type === 'done') {
               setThinking(false);
+              const finalText = accumulated;
               accumulated = '';
               setMessages(m => {
                 const last = m[m.length - 1];
                 if (last && last._streaming) {
                   const { _streaming, ...clean } = last;
-                  return [...m.slice(0, -1), clean];
+                  // Split on --- delimiter for multi-bubble messages
+                  const parts = finalText.split(/\n---\n/).map(p => p.trim()).filter(Boolean);
+                  if (parts.length <= 1) {
+                    return [...m.slice(0, -1), { ...clean, text: parts[0] || finalText }];
+                  }
+                  // First part replaces the streaming bubble; schedule the rest
+                  parts.slice(1).forEach((part, i) => {
+                    setTimeout(() => {
+                      setMessages(prev => [...prev, { from: 'chloe', text: part, at: nowTime() }]);
+                    }, (i + 1) * 480);
+                  });
+                  return [...m.slice(0, -1), { ...clean, text: parts[0] }];
                 }
                 return m;
               });

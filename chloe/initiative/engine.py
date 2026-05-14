@@ -23,7 +23,7 @@ from chloe.observability import live_buffer
 
 log = get_logger("initiative.engine")
 
-DAILY_WEB_SEARCH_CAP = 3
+DAILY_WEB_SEARCH_CAP = 8
 _SEARCH_BUDGET_KV_KEY = "initiative:web_search_count:{date}"
 
 
@@ -181,13 +181,17 @@ async def tick() -> object | None:
             return None
         action.args["text"] = note_text
 
-    # Budget gate: interest-driven web searches capped at 3/day.
+    # Budget gate: interest-driven web searches capped per day.
+    # gen_level=1 searches have an additional tighter daily cap.
     if best.tool == "web_search" and best.source == "interest":
         if _web_search_budget_remaining() <= 0:
             log.info("tick_web_search_budget_exhausted", date=datetime.now().date().isoformat())
             chloe_initiative_ticks_total.labels(outcome="idle").inc()
             return None
         _consume_web_search_budget()
+        if best.gen_level == 1:
+            from chloe.initiative.candidates import consume_gen1_search_budget
+            consume_gen1_search_budget()
 
     result = None
     try:
