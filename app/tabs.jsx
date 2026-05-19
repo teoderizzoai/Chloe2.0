@@ -229,12 +229,11 @@ function highlight(text, query) {
 
 /* ─────────────────────── ONBOARDING FLOW ─────────────────────── */
 const ONBOARDING_QUESTIONS = [
-  { id: "intro",   q: "Tell me who you are. Name, where you're from, whatever feels like the basics." },
-  { id: "work",    q: "What do you do for work? What does a typical week look like?" },
-  { id: "family",  q: "Tell me about your family. Who's in it, where are they, what are they like?" },
-  { id: "friends", q: "Who are your close friends? Names and what they're like, or how you know them." },
-  { id: "pets",    q: "Any pets? Tell me about them." },
-  { id: "tastes",  q: "What are you into? Hobbies, music, things you spend time on, whatever you actually enjoy." },
+  { id: "work",    q: "What do you do? What are you building or working on right now?" },
+  { id: "people",  q: "Who are the important people in your life? Names and what the deal is with each." },
+  { id: "tastes",  q: "What are you into right now — music, ideas, aesthetics, anything that keeps pulling your attention?" },
+  { id: "bothers", q: "What genuinely bothers you? Things that consistently feel wrong or broken." },
+  { id: "us",      q: "How do you want this to feel — you and me?" },
 ];
 
 function OnboardingFlow({ onDone, onCancel }) {
@@ -405,7 +404,7 @@ function RelationshipsTab({ data }) {
             <div>
               <div style={{fontWeight: 600, marginBottom: 4}}>She doesn't know you yet.</div>
               <div style={{fontSize: 14, color:"var(--ink-soft)"}}>
-                Six quick questions — who you are, family, friends, job, pets, interests. A starting point so she knows you.
+                Run a short onboarding — five questions. She'll remember your answers at high salience and synthesize a standing read on you.
               </div>
             </div>
             <button className="primary" style={{flexShrink: 0, marginLeft: 20}} onClick={() => setShowOnboarding(true)}>
@@ -871,15 +870,7 @@ function Toggle({ checked, onChange }) {
 
 /* ───────────────────────── INNER STATE ───────────────────────── */
 function InnerStateTab({ data }) {
-  const [liveIS, setLiveIS] = React.useState(null);
-  React.useEffect(() => {
-    const base = window.__CHLOE_API_BASE__ || '';
-    fetch(base + '/v1/dashboard/state')
-      .then(r => r.ok ? r.json() : Promise.reject())
-      .then(d => { if (d.inner_state) setLiveIS(d.inner_state); })
-      .catch(() => {});
-  }, []);
-  const IS = liveIS || (data.inner_state) || {};
+  const IS = (data.inner_state) || {};
   const reflect = IS.reflect || {};
   const kv = IS.kv || {};
 
@@ -1279,18 +1270,17 @@ function DebugTab() {
 function AdminTab() {
   const [section, setSection] = React.useState("memories");
   const sections = [
-    { id: "memories",    label: "Memories" },
-    { id: "prompts",     label: "Prompts" },
-    { id: "kv",          label: "KV State" },
-    { id: "persons",     label: "People" },
-    { id: "inner",       label: "Inner State" },
-    { id: "controls",    label: "Controls" },
+    { id: "memories", label: "Memories" },
+    { id: "prompts",  label: "Prompts" },
+    { id: "kv",       label: "KV State" },
+    { id: "persons",  label: "People" },
+    { id: "controls", label: "Controls" },
   ];
 
   return (
     <div>
       <p className="section-intro">
-        Full control over Chloe's state — memories, prompts, KV, people, inner state, and manual triggers.
+        Full control over Chloe's state — memories, prompts, KV, people, and manual triggers.
         Changes take effect immediately.
       </p>
       <div className="filter-row">
@@ -1303,7 +1293,6 @@ function AdminTab() {
       {section === "prompts"  && <AdminPrompts />}
       {section === "kv"       && <AdminKV />}
       {section === "persons"  && <AdminPersons />}
-      {section === "inner"    && <AdminInnerState />}
       {section === "controls" && <AdminControls />}
     </div>
   );
@@ -1742,111 +1731,6 @@ function AdminPersons() {
           </div>
         ))}
       </div>
-    </div>
-  );
-}
-
-
-/* ── Admin: Inner State ── */
-const INNER_KINDS = [
-  { id: "interests",    label: "Interests",    url: "/admin/interests",       textKey: "label", metaKey: "why",    scaleKey: "intensity" },
-  { id: "goals",        label: "Goals",        url: "/admin/inner/goals",     textKey: "text",  metaKey: "extra",  scaleKey: "progress" },
-  { id: "wants",        label: "Wants",        url: "/admin/inner/wants",     textKey: "text",  metaKey: "extra",  scaleKey: "pressure" },
-  { id: "fears",        label: "Fears",        url: "/admin/inner/fears",     textKey: "text",  metaKey: null,     scaleKey: "pressure" },
-  { id: "tensions",     label: "Tensions",     url: "/admin/inner/tensions",  textKey: "text",  metaKey: null,     scaleKey: "pressure" },
-  { id: "questions",    label: "Questions",    url: "/admin/inner/questions", textKey: "text",  metaKey: "extra",  scaleKey: "pressure" },
-  { id: "anticipations",label: "Anticipations",url: "/admin/inner/anticipations", textKey: "text", metaKey: null, scaleKey: "pressure" },
-  { id: "aversions",     label: "Aversions",     url: "/admin/inner/aversions",     textKey: "text", metaKey: null,    scaleKey: null },
-  { id: "ideas",         label: "Ideas",         url: "/admin/inner/ideas",         textKey: "text", metaKey: null,    scaleKey: null },
-  { id: "world_beliefs", label: "World Beliefs", url: "/admin/inner/world_beliefs", textKey: "text", metaKey: "extra", scaleKey: "pressure" },
-];
-
-function AdminInnerState() {
-  const [kind, setKind] = React.useState("interests");
-  const spec = INNER_KINDS.find(k => k.id === kind);
-  return (
-    <div style={{marginTop:18}}>
-      <div style={{display:"flex", flexWrap:"wrap", gap:8, marginBottom:16}}>
-        {INNER_KINDS.map(k => (
-          <button key={k.id}
-            className={"small" + (kind === k.id ? " primary" : "")}
-            onClick={() => setKind(k.id)}
-          >{k.label}</button>
-        ))}
-      </div>
-      {spec && <AdminInnerList spec={spec} />}
-    </div>
-  );
-}
-
-function AdminInnerList({ spec }) {
-  const { data, loading, error, reload } = useAdminFetch(spec.url);
-  const [msg, setMsg] = React.useState(null);
-
-  const flash = (m) => { setMsg(m); setTimeout(() => setMsg(null), 2500); };
-
-  const del = async (id) => {
-    const deleteUrl = spec.id === "interests"
-      ? `/admin/interests/${id}`
-      : `/admin/inner/${spec.id}/${id}`;
-    if (!confirm(`Delete this ${spec.label.toLowerCase().replace(/s$/, '')}?`)) return;
-    try {
-      await AdminApi('DELETE', deleteUrl);
-      flash('deleted'); reload();
-    } catch (e) { flash('error: ' + e); }
-  };
-
-  if (loading) return <div className="card"><div className="empty">loading…</div></div>;
-  if (error)   return <div className="card" style={{color:"var(--rose)"}}>{error}</div>;
-
-  const items = data
-    ? (spec.id === "interests" ? (data.interests || []) : (data.items || []))
-    : [];
-
-  return (
-    <div className="card">
-      <div className="hd">
-        {spec.label} ({items.length})
-        <span className="stretch"></span>
-        <button className="ghost small" onClick={reload}>refresh</button>
-      </div>
-      {msg && <div style={{fontSize:13, color:"var(--sage)", marginBottom:10}} className="mono">{msg}</div>}
-      {items.length === 0 ? (
-        <div className="empty" style={{padding:"12px 0"}}>nothing here.</div>
-      ) : items.map(item => (
-        <div key={item.id} style={{
-          display:"flex", alignItems:"flex-start", gap:10,
-          padding:"10px 0", borderBottom:"1px solid var(--rule)"
-        }}>
-          <div style={{flex:1, minWidth:0}}>
-            <div style={{fontSize:14, lineHeight:1.5}}>{item[spec.textKey]}</div>
-            <div style={{display:"flex", gap:10, marginTop:3, flexWrap:"wrap", alignItems:"center"}}>
-              {spec.metaKey && item[spec.metaKey] && (
-                <span style={{fontSize:12, color:"var(--ink-mute)", fontStyle:"italic"}}>{item[spec.metaKey]}</span>
-              )}
-              {spec.scaleKey && item[spec.scaleKey] != null && (
-                <span className="mono" style={{fontSize:11, color:"var(--ink-mute)"}}>
-                  {spec.scaleKey} {(item[spec.scaleKey] * 100).toFixed(0)}%
-                </span>
-              )}
-              {item.resolved != null && (
-                <span className="pill" style={{fontSize:10, opacity:0.7}}>
-                  {item.resolved ? "resolved" : "active"}
-                </span>
-              )}
-              {item.status && (
-                <span className="pill" style={{fontSize:10, opacity:0.7}}>{item.status}</span>
-              )}
-              <span className="mono" style={{fontSize:11, color:"var(--ink-mute)"}}>#{item.id}</span>
-            </div>
-          </div>
-          <button
-            className="ghost small"
-            style={{color:"var(--rose)", flexShrink:0}}
-            onClick={() => del(item.id)}
-          >delete</button>
-        </div>
-      ))}
     </div>
   );
 }

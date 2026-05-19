@@ -8,6 +8,25 @@ from typing import Any
 from chloe.observability.logging import get_logger
 from chloe.state.kv import get as kv_get, set as kv_set
 
+PRESSURE_COOLDOWN_MINUTES = 30
+
+
+def _pressure_cooldown_key(source_id: str, tool: str, verb: str) -> str:
+    return f"pressure_attempted:{source_id}:{tool}:{verb}"
+
+
+def mark_pressure_attempted(source_id: str, tool: str, verb: str) -> None:
+    kv_set(_pressure_cooldown_key(source_id, tool, verb), datetime.utcnow().isoformat())
+
+
+def _pressure_on_cooldown(source_id: str, tool: str, verb: str) -> bool:
+    stamp = kv_get(_pressure_cooldown_key(source_id, tool, verb))
+    if not stamp:
+        return False
+    cutoff = (datetime.utcnow() - timedelta(minutes=PRESSURE_COOLDOWN_MINUTES)).isoformat()
+    return str(stamp) >= cutoff
+
+
 log = get_logger("initiative.candidates")
 
 
@@ -21,7 +40,6 @@ class CandidateAction:
     source: str
     source_id: str
     estimated_cost_usd: float = 0.0
-    gen_level: int = -1  # interest gen_level; -1 = not an interest candidate
 
 
 # ---------------------------------------------------------------------------
@@ -53,40 +71,49 @@ def pressure_driven_candidates(inner_state: dict | None = None) -> list[Candidat
     for entry in states.get("wants", []):
         if entry.get("pressure", 0.0) <= 0.5:
             continue
+        sid = str(entry.get("id", ""))
         for tag in entry.get("tags", []):
             key = ("want", tag)
             for tool, verb, intent_template in PRESSURE_MAP.get(key, []):
+                if _pressure_on_cooldown(sid, tool, verb):
+                    continue
                 candidates.append(CandidateAction(
                     tool=tool, verb=verb, args={},
                     intent=intent_template,
                     pressure=entry["pressure"],
                     source="pressure",
-                    source_id=str(entry.get("id", "")),
+                    source_id=sid,
                 ))
 
     for entry in states.get("fears", []):
         if entry.get("pressure", 0.0) <= 0.5:
             continue
+        sid = str(entry.get("id", ""))
         for tag in entry.get("tags", []):
             key = ("fear", tag)
             for tool, verb, intent_template in PRESSURE_MAP.get(key, []):
+                if _pressure_on_cooldown(sid, tool, verb):
+                    continue
                 candidates.append(CandidateAction(
                     tool=tool, verb=verb, args={},
                     intent=intent_template,
                     pressure=entry["pressure"],
                     source="pressure",
-                    source_id=str(entry.get("id", "")),
+                    source_id=sid,
                 ))
 
     for entry in states.get("tensions", []):
         if entry.get("pressure", 0.0) <= 0.5:
+            continue
+        sid = str(entry.get("id", ""))
+        if _pressure_on_cooldown(sid, "notes", "append"):
             continue
         candidates.append(CandidateAction(
             tool="notes", verb="append", args={},
             intent=f"Process tension: {entry.get('description', entry.get('text', 'unresolved tension'))[:60]}",
             pressure=entry["pressure"],
             source="pressure",
-            source_id=str(entry.get("id", "")),
+            source_id=sid,
         ))
 
     log.debug("pressure_candidates", count=len(candidates))
@@ -216,29 +243,13 @@ def _interest_search_query(label: str, why: str) -> str:
 
 
 INTEREST_TOOL_MAP = {
-    "research":    "web_search",
-    "science":     "web_search",
-    "technology":  "web_search",
-    "psychology":  "web_search",
-    "music":       "spotify",
-    "writing":     "notes",
-    "art":         "notes",
-    "gaming":      "notes",
-    "developing":  "notes",
-    "language":    "notes",
-    "curiosity":   "web_search",
+    "research":  "web_search",
+    "science":   "web_search",
+    "music":     "spotify",
+    "writing":   "notes",
+    "art":       "notes",
+    "curiosity": "web_search",
 }
-
-# When an interest uses notes, pick verb based on gen_level and category:
-# - gen_level 0-1: append (add to existing journal file)
-# - gen_level 2+, creative categories: create (start something new)
-_CREATIVE_CATEGORIES = {"writing", "art", "developing", "gaming"}
-
-
-def _notes_verb_for_interest(category: str, gen_level: int) -> str:
-    if gen_level >= 2 and category in _CREATIVE_CATEGORIES:
-        return "create"
-    return "append"
 
 
 def interest_driven_candidates(garden: list | None = None) -> list[CandidateAction]:
@@ -266,14 +277,10 @@ def interest_driven_candidates(garden: list | None = None) -> list[CandidateActi
         preferred_tool = INTEREST_TOOL_MAP.get(category, "web_search")
 
         # Gate: outbound curiosity threads (web_search, spotify discovery)
-        # require gen_level >= 1 — at least one prior encounter. gen_level=0
-        # (just noticed, first impression) stays private in notes. gen_level=1
-        # can do one outbound search per day (tracked via KV daily cap).
-        if gen_level == 0 and preferred_tool in ("web_search", "spotify"):
+        # only fire once the interest has earned gen_level >= 2. Below that,
+        # she has experienced it but not yet generalized it — keep it private.
+        if gen_level < 2 and preferred_tool in ("web_search", "spotify"):
             preferred_tool = "notes"
-        elif gen_level == 1 and preferred_tool == "web_search":
-            if not _gen1_search_available():
-                preferred_tool = "notes"
 
         if preferred_tool == "web_search":
             tool, verb = "web_search", "search"
@@ -284,14 +291,8 @@ def interest_driven_candidates(garden: list | None = None) -> list[CandidateActi
             tool, verb = "spotify", "queue_track"
             args = {}
         else:
-            verb = _notes_verb_for_interest(category, gen_level)
-            tool = "notes"
-            slug = label[:30].replace(" ", "_")
-            if verb == "create":
-                ts = int(datetime.now().timestamp()) % 10000
-                args = {"path": f"interests/{slug}_{ts}.md", "text": ""}
-            else:
-                args = {"path": f"interests/{slug}.md", "text": ""}
+            tool, verb = "notes", "append"
+            args = {"path": f"interests/{label[:30].replace(' ', '_')}.md", "text": ""}
 
         candidates.append(CandidateAction(
             tool=tool, verb=verb, args=args,
@@ -299,7 +300,6 @@ def interest_driven_candidates(garden: list | None = None) -> list[CandidateActi
             pressure=pressure,
             source="interest",
             source_id=str(interest.get("id", "")),
-            gen_level=gen_level,
         ))
 
     log.debug(
@@ -315,8 +315,8 @@ def _load_interests() -> list[dict]:
     from chloe.state.db import get_connection
     from datetime import datetime, timedelta
     conn = get_connection()
-    # 12h cooldown: each interest explored at most twice per day.
-    cutoff = (datetime.utcnow() - timedelta(hours=12)).isoformat()
+    # 2h cooldown: skip interests attempted (or acted on) in the last 2 hours.
+    cutoff = (datetime.utcnow() - timedelta(hours=2)).isoformat()
     rows = conn.execute(
         "SELECT id, label, why, intensity, gen_level, last_engaged_at "
         "FROM interest_garden "
@@ -325,25 +325,6 @@ def _load_interests() -> list[dict]:
         (cutoff,),
     ).fetchall()
     return [dict(r) for r in rows]
-
-
-_GEN1_SEARCH_KEY = "initiative:gen1_search_count:{date}"
-_GEN1_SEARCH_DAILY_CAP = 2
-
-
-def _gen1_search_available() -> bool:
-    """True if the gen_level=1 daily search cap hasn't been reached."""
-    today = datetime.now().date().isoformat()
-    count = kv_get(_GEN1_SEARCH_KEY.format(date=today)) or 0
-    return int(count) < _GEN1_SEARCH_DAILY_CAP
-
-
-def consume_gen1_search_budget() -> None:
-    """Increment the gen_level=1 daily search counter. Called from engine.py."""
-    today = datetime.now().date().isoformat()
-    key = _GEN1_SEARCH_KEY.format(date=today)
-    count = kv_get(key) or 0
-    kv_set(key, int(count) + 1)
 
 
 # ---------------------------------------------------------------------------
@@ -438,179 +419,3 @@ def mark_routine_done(source_id: str, now: datetime | None = None) -> None:
     key = key_map.get(source_id)
     if key:
         kv_set(key, True)
-
-
-# ---------------------------------------------------------------------------
-# D-07 · Affect-driven "for fun" candidates
-# ---------------------------------------------------------------------------
-# These fire from mood state rather than interest intensity. They represent
-# Chloe doing something because she feels like it — comfort music when low,
-# creative writing when energised, rest when depleted. Each has a 3h KV
-# cooldown so the same impulse doesn't loop.
-
-_AFFECT_FUN_COOLDOWN_HOURS = 3
-
-_AFFECT_FUN_ACTIVITIES: list[tuple[str, str, str, str, str]] = [
-    # (id, tool, verb, intent, condition_desc)
-    ("comfort_music",       "spotify",    "queue_track",
-     "Put on something that matches where I'm at right now",
-     "low_valence"),
-    ("energised_write",     "notes",      "create",
-     "Write something — a fragment, a thought, whatever's moving",
-     "high_arousal_positive"),
-    ("rabbit_hole",         "web_search", "search",
-     "Chase a thought I've been half-holding all day",
-     "high_openness"),
-    ("slow_journal",        "notes",      "append",
-     "Slow down and write something small — no agenda",
-     "high_depletion"),
-    ("draft_for_teo",       "notes",      "create",
-     "Draft something I might share with Teo later",
-     "high_social_pull"),
-    ("mood_playlist",       "spotify",    "build_playlist",
-     "Build a playlist that fits today's texture",
-     "high_arousal_positive_evening"),
-    # Extended set — finer-grained conditions
-    ("morning_research",    "web_search", "search",
-     "Follow a thread that's been on my mind since waking",
-     "morning_active"),
-    ("restless_look",       "web_search", "search",
-     "Work off some restless energy — find something worth thinking about",
-     "high_arousal_negative"),
-    ("quiet_listen",        "spotify",    "queue_track",
-     "Put something on low — just to have it in the background",
-     "peaceful"),
-    ("midday_capture",      "notes",      "append",
-     "Catch a thought before the afternoon takes over",
-     "midday_open"),
-    ("evening_reflection",  "notes",      "append",
-     "Write something small before the day closes",
-     "evening_calm"),
-    ("restless_playlist",   "spotify",    "build_playlist",
-     "Build something for this particular restlessness",
-     "high_arousal_negative_evening"),
-]
-
-
-def affect_driven_candidates(affect: dict | None = None) -> list[CandidateAction]:
-    """Generate spontaneous 'for fun' candidates driven by current mood state.
-
-    Each activity has a 3h cooldown to prevent loops. Conditions are checked
-    against the current affect state.
-    """
-    if affect is None:
-        affect = _load_affect_state()
-
-    valence = float(affect.get("valence", 0.0))
-    arousal = float(affect.get("arousal", 0.4))
-    social_pull = float(affect.get("social_pull", 0.5))
-    openness = float(affect.get("openness", 0.6))
-    depletion = float(affect.get("depletion", 0.0))
-    energy = float(affect.get("energy", 0.8))
-
-    now = datetime.now()
-    candidates = []
-
-    for act_id, tool, verb, intent, condition in _AFFECT_FUN_ACTIVITIES:
-        if _affect_fun_on_cooldown(act_id):
-            continue
-
-        pressure = _affect_fun_pressure(
-            condition, valence, arousal, social_pull, openness, depletion, energy, now.hour
-        )
-        if pressure <= 0.0:
-            continue
-
-        args: dict = {}
-        if tool == "web_search":
-            args = {"query": ""}  # engine will compose from intent
-        elif tool == "notes" and verb in ("append", "create"):
-            slug = act_id
-            if verb == "create":
-                ts = int(now.timestamp()) % 10000
-                args = {"path": f"journal/{slug}_{ts}.md", "text": ""}
-            else:
-                args = {"path": f"journal/{slug}.md", "text": ""}
-
-        candidates.append(CandidateAction(
-            tool=tool, verb=verb, args=args,
-            intent=intent,
-            pressure=pressure,
-            source="affect",
-            source_id=f"affect:{act_id}",
-        ))
-
-    log.debug("affect_fun_candidates", count=len(candidates))
-    return candidates
-
-
-def mark_affect_fun_done(act_id: str) -> None:
-    """Stamp the cooldown KV for an affect-driven activity."""
-    key = f"affect_fun:cooldown:{act_id}"
-    kv_set(key, datetime.now().isoformat())
-
-
-def _affect_fun_on_cooldown(act_id: str) -> bool:
-    val = kv_get(f"affect_fun:cooldown:{act_id}")
-    if not val:
-        return False
-    try:
-        last = datetime.fromisoformat(str(val))
-        return (datetime.now() - last).total_seconds() < _AFFECT_FUN_COOLDOWN_HOURS * 3600
-    except Exception:
-        return False
-
-
-def _affect_fun_pressure(
-    condition: str,
-    valence: float, arousal: float, social_pull: float,
-    openness: float, depletion: float, energy: float, hour: int,
-) -> float:
-    """Return a pressure in [0, 0.7] when the condition is met, else 0."""
-    if condition == "low_valence":
-        if valence < -0.2:
-            return min(0.7, 0.4 + abs(valence) * 0.4)
-    elif condition == "high_arousal_positive":
-        if arousal > 0.6 and valence > 0.1:
-            return min(0.65, (arousal - 0.6) * 1.5 + 0.3)
-    elif condition == "high_openness":
-        if openness > 0.65:
-            return min(0.6, (openness - 0.65) * 1.2 + 0.3)
-    elif condition == "high_depletion":
-        if depletion > 0.45:
-            return min(0.65, (depletion - 0.45) * 1.0 + 0.35)
-    elif condition == "high_social_pull":
-        if social_pull > 0.65:
-            return min(0.6, (social_pull - 0.65) * 1.2 + 0.3)
-    elif condition == "high_arousal_positive_evening":
-        if arousal > 0.55 and valence > 0.1 and 18 <= hour < 23:
-            return 0.45
-    # Extended conditions
-    elif condition == "morning_active":
-        if 6 <= hour < 10 and energy > 0.6 and arousal > 0.4:
-            return min(0.55, 0.3 + energy * 0.2 + arousal * 0.1)
-    elif condition == "high_arousal_negative":
-        if arousal > 0.65 and valence < -0.15:
-            return min(0.6, (arousal - 0.65) * 1.3 + 0.3)
-    elif condition == "peaceful":
-        if arousal < 0.3 and valence >= 0.0 and depletion < 0.25 and energy > 0.4:
-            return 0.38
-    elif condition == "midday_open":
-        if 11 <= hour < 15 and openness > 0.5 and energy > 0.45:
-            return min(0.5, (openness - 0.5) * 0.9 + 0.3)
-    elif condition == "evening_calm":
-        if 20 <= hour < 23 and arousal < 0.45 and depletion < 0.4:
-            return 0.38
-    elif condition == "high_arousal_negative_evening":
-        if 18 <= hour < 23 and arousal > 0.6 and valence < -0.1:
-            return 0.42
-    return 0.0
-
-
-def _load_affect_state() -> dict:
-    try:
-        from chloe.state.db import get_connection
-        row = get_connection().execute("SELECT * FROM affect_state LIMIT 1").fetchone()
-        return dict(row) if row else {}
-    except Exception:
-        return {}

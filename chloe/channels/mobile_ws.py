@@ -86,17 +86,6 @@ async def handle_mobile_ws(websocket: Any, person_id: str = "1") -> None:
 
             _persist_chat_turn("user", user_text, person_id)
 
-            # Goodbye gate — skip LLM for clear farewells; optionally emit a terse reply.
-            if _is_goodbye(user_text):
-                import random
-                _save_conversation_end_register()
-                if random.random() < 0.30:
-                    short_reply = random.choice(_GOODBYE_SHORT_REPLIES)
-                    await websocket.send_text(json.dumps({"type": "chunk", "text": short_reply}))
-                    _persist_chat_turn("assistant", short_reply, person_id)
-                await websocket.send_text(json.dumps({"type": "done", "artifact_preview": None}))
-                continue
-
             # Resolve any pending kinetic-sensitive confirm ticket if user consented.
             await _maybe_resolve_pending_confirm(user_text, person_id)
 
@@ -470,62 +459,8 @@ async def _extract_and_process_mentions(user_text: str, reply: str, person_id: s
         except Exception:
             pass
 
-        # Resolve open questions when Teo's message appears to answer them.
-        # Uses word-overlap heuristic — no extra LLM call needed.
-        try:
-            _resolve_questions_from_turn(user_text, person_id)
-        except Exception as exc:
-            log.warning("question_resolution_failed", error=str(exc))
-
     except Exception as exc:
         log.warning("mention_extraction_failed", error=str(exc))
-
-
-_Q_STOPWORDS = {
-    "a", "an", "the", "of", "in", "on", "at", "to", "for", "and", "or", "is",
-    "are", "was", "be", "been", "being", "it", "its", "that", "this", "with",
-    "by", "from", "as", "what", "how", "which", "his", "her", "their", "he",
-    "she", "they", "you", "your", "i", "me", "my", "we", "our", "do", "did",
-    "does", "has", "have", "had", "s",
-}
-
-
-def _resolve_questions_from_turn(user_text: str, person_id: str) -> None:
-    """Mark inner_questions resolved when Teo's message appears to answer them.
-
-    Heuristic: tokenise both the question and user_text, remove stopwords,
-    require ≥3 overlapping content words and overlap ≥ 40% of the question's
-    keywords. Domain='teo' questions only — 'self'/'world' questions need
-    richer context to resolve.
-    """
-    from chloe.state.db import get_connection
-    conn = get_connection()
-    rows = conn.execute(
-        "SELECT id, text FROM inner_questions WHERE resolved=0 AND domain='teo'"
-    ).fetchall()
-    if not rows:
-        return
-
-    user_words = {w for w in user_text.lower().split() if w not in _Q_STOPWORDS and len(w) > 2}
-    if not user_words:
-        return
-
-    resolved_ids = []
-    for row in rows:
-        q_words = {w for w in row["text"].lower().split() if w not in _Q_STOPWORDS and len(w) > 2}
-        if not q_words:
-            continue
-        overlap = len(q_words & user_words)
-        if overlap >= 3 and overlap / len(q_words) >= 0.4:
-            resolved_ids.append(row["id"])
-
-    if resolved_ids:
-        conn.executemany(
-            "UPDATE inner_questions SET resolved=1 WHERE id=?",
-            [(rid,) for rid in resolved_ids],
-        )
-        conn.commit()
-        log.info("questions_resolved_from_chat", ids=resolved_ids, person_id=person_id)
 
 
 def _worth_witnessing(exchange: str, salience: float, ambiguity: float) -> bool:
@@ -716,29 +651,6 @@ async def _handle_reaction(msg: dict, person_id: str) -> None:
         log.warning("handle_reaction_failed", error=str(exc))
 
 
-_GOODBYE_PHRASES = {
-    "bye", "goodbye", "ciao", "see you", "see ya", "good night", "goodnight",
-    "talk later", "talk soon", "ttyl", "gn", "night", "later", "gotta go",
-    "heading out", "heading off", "going to bed", "going to sleep",
-    "talk tomorrow", "until tomorrow", "adios", "peace", "take care",
-}
-
-_GOODBYE_SHORT_REPLIES = [
-    "night.", "later.", "ok.", "yeah.", "good.", "got it.", "see you.",
-]
-
-
-def _is_goodbye(text: str) -> bool:
-    """True when the message is clearly a farewell with no substantial content."""
-    lower = text.strip().lower().rstrip("!.,~")
-    if lower in _GOODBYE_PHRASES:
-        return True
-    for phrase in _GOODBYE_PHRASES:
-        if lower.startswith(phrase) and len(lower) < len(phrase) + 12:
-            return True
-    return False
-
-
 def _person_name(person_id: str) -> str:
     try:
         from chloe.state.db import get_connection
@@ -808,9 +720,6 @@ _ROUTINE_SKIP_HEADERS = {
     "## Things you're genuinely wondering about",
     "## How your current state is shaping your perception",
     "## What to recalibrate this week",
-    "## How you read him",
-    "## What you're drawn toward",
-    "## How Teo seemed recently",
 }
 
 

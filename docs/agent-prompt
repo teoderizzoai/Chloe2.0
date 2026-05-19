@@ -1,4 +1,4 @@
-# Chloe AGI Improvement — Agent Team Prompt
+# Chloe AGI Improvement — Agent Team
 
 ## Goal
 
@@ -6,34 +6,6 @@ This team's mission is to make Chloe indistinguishable from a real person and tr
 
 ---
 
-## Prerequisite
-
-Enable agent teams before spawning:
-
-```json
-// ~/.claude/settings.json or project .claude/settings.json
-{
-  "env": {
-    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
-  }
-}
-```
-
----
-
-## How to Launch
-
-Paste the following into Claude Code (team lead session) from `/home/teo-derizzo/Documents/Chloe`:
-
-```
-Create an agent team with 5 teammates to deeply analyze and improve Chloe.
-Use the following roles and spawn prompts exactly as described below.
-Wait for Researcher and Strategist to finish before Critic begins.
-Wait for all three analysis roles to finish before Programmer and Psychologist begin.
-After all five complete, synthesize everything into docs/agent-teams-patterns.md with one section per agent.
-```
-
----
 
 ## Team Members
 

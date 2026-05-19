@@ -275,8 +275,9 @@ async def _store_held_back_memory(action: Action, reason: str) -> None:
     conn = get_connection()
     # Dedupe: if an identical (tool, verb, intent) held_back already exists in
     # the last hour, skip insert to avoid loop pollution.
-    from datetime import datetime, timezone, timedelta
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    from datetime import datetime, timedelta
+    # Use UTC naive format to match SQLite CURRENT_TIMESTAMP ("YYYY-MM-DD HH:MM:SS")
+    cutoff = (datetime.utcnow() - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
     like_pat = f"I almost {action.verb} via {action.tool}.%Intent: {action.intent}"
     existing = conn.execute(
         """

@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 
 import httpx
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Query
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 
@@ -376,7 +376,6 @@ async def delete_memory(memory_id: int) -> dict:
     from chloe.state.db import get_connection
     from chloe.memory.store import delete_from_chroma
     conn = get_connection()
-    conn.execute("UPDATE actions SET becomes_memory_id = NULL WHERE becomes_memory_id = ?", (memory_id,))
     conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
     conn.commit()
     delete_from_chroma(memory_id)
@@ -561,8 +560,11 @@ async def onboarding_status() -> dict:
 @admin_router.post("/onboarding/complete")
 async def complete_onboarding(body: OnboardingComplete) -> dict:
     from chloe.memory import store as mem_store
+    from chloe.state.db import get_connection
     from chloe.state.kv import set as kv_set
     import asyncio
+
+    conn = get_connection()
 
     qa_text = "\n\n".join(
         f"Q: {item.question}\nA: {item.answer.strip()}"
@@ -570,9 +572,7 @@ async def complete_onboarding(body: OnboardingComplete) -> dict:
         if item.answer.strip()
     )
 
-    # Store raw Q&A immediately so memories are available before extraction finishes
-    from chloe.state.db import get_connection as _get_conn
-    _conn = _get_conn()
+    # Store raw Q&A as onboarding memories (these will be replaced/supplemented by extraction)
     raw_ids = []
     for item in body.answers:
         if item.answer.strip():
@@ -585,30 +585,15 @@ async def complete_onboarding(body: OnboardingComplete) -> dict:
                 tags=["onboarding", "teo_profile"],
             )
             raw_ids.append(mid)
-            _conn.execute("UPDATE memories SET subject_person_id=1 WHERE id=?", (mid,))
-    _conn.commit()
+
+    # Run structured extraction
+    extraction = await _run_onboarding_extraction(qa_text, conn)
 
     kv_set("onboarding:teo:complete", "1")
-
-    # Run extraction in background — don't block the response
-    asyncio.create_task(_run_extraction_bg(qa_text))
-
-    log.info("onboarding_complete", raw_memories=len(raw_ids))
-    return {"status": "ok", "raw_memories": len(raw_ids), "extraction": "pending"}
-
-
-async def _run_extraction_bg(qa_text: str) -> None:
-    """Background task: structured extraction after onboarding answers are stored."""
-    try:
-        from chloe.identity.onboarding import run_extraction
-        from chloe.state.db import get_connection
-        conn = get_connection()
-        result = await run_extraction(qa_text, conn)
-        log.info("onboarding_extraction_bg_done",
-                 knowledge=result.get("knowledge_statements", 0),
-                 people=len(result.get("people_found") or []))
-    except Exception as exc:
-        log.warning("onboarding_extraction_bg_failed", error=str(exc))
+    log.info("onboarding_complete", raw_memories=len(raw_ids),
+             knowledge=len(extraction.get("knowledge_statements", [])),
+             people=len(extraction.get("people", [])))
+    return {"status": "ok", "raw_memories": len(raw_ids), **extraction}
 
 
 @admin_router.post("/onboarding/re-extract")
@@ -629,80 +614,187 @@ async def re_extract_onboarding() -> dict:
 
 
 async def _run_onboarding_extraction(qa_text: str, conn) -> dict:
-    from chloe.identity.onboarding import run_extraction
-    return await run_extraction(qa_text, conn)
+    """Run Flash extraction over onboarding Q&A, write results to DB, return summary."""
+    import asyncio
+    import json as _json
+    from pathlib import Path as _Path
+    from chloe.llm.gemini import GeminiClient
+    from chloe.memory import store as mem_store
+    from chloe.state.kv import set as kv_set
+    from datetime import datetime, timezone
 
+    client = GeminiClient()
 
-# ── Vitals history ───────────────────────────────────────────────────────────
+    # Use flash_text to avoid Gemini's additionalProperties restriction on nested schemas.
+    # The prompt already asks for JSON, so we parse it manually.
+    extraction = None
+    try:
+        prompt_path = _Path(__file__).resolve().parents[1] / "llm" / "prompts" / "onboarding_extract.md"
+        raw_prompt = prompt_path.read_text().replace("{{qa_text}}", qa_text)
+        raw = await asyncio.wait_for(
+            client.flash_text(raw_prompt, max_output_tokens=4000),
+            timeout=60,
+        )
+        if raw:
+            # Strip markdown fences if present
+            cleaned = raw.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+            extraction = _json.loads(cleaned)
+    except Exception as exc:
+        log.warning("onboarding_extraction_failed", error=str(exc))
 
-@admin_router.get("/vitals/history")
-async def vitals_history(hours: int = Query(24, le=168)) -> dict:
-    from chloe.state.db import get_connection
-    conn = get_connection()
-    rows = conn.execute(
-        "SELECT energy, valence, arousal, social_pull, openness, created_at "
-        "FROM vitals_log WHERE created_at > datetime('now', ? || ' hours') ORDER BY created_at ASC",
-        (f"-{hours}",),
-    ).fetchall()
-    return {"hours": hours, "points": [dict(r) for r in rows]}
+    if not extraction:
+        return {"extraction": "failed"}
 
+    now = datetime.now(timezone.utc).isoformat()
 
-# ── Interest garden ───────────────────────────────────────────────────────────
+    # Clear previous onboarding_extract memories before re-writing (idempotent)
+    conn.execute("DELETE FROM memories WHERE source='onboarding_extract'")
 
-@admin_router.get("/interests")
-async def list_interests() -> dict:
-    from chloe.state.db import get_connection
-    conn = get_connection()
-    rows = conn.execute(
-        "SELECT id, label, why, intensity, last_engaged_at FROM interest_garden ORDER BY intensity DESC"
-    ).fetchall()
-    return {"interests": [dict(r) for r in rows]}
+    # Store knowledge statements as high-salience semantic memories
+    for stmt in extraction.get("knowledge_statements", []):
+        if stmt.strip():
+            mem_store.add(
+                kind="semantic",
+                text=stmt.strip(),
+                source="onboarding_extract",
+                salience=0.85,
+                weight=1.0,
+                tags=["onboarding", "teo_profile", "knowledge"],
+            )
 
+    # Write trait_profile to persons row for Teo
+    trait_profile = extraction.get("trait_profile", {})
+    if trait_profile:
+        conn.execute(
+            "UPDATE persons SET trait_profile = ? WHERE id = 1",
+            (_json.dumps(trait_profile),),
+        )
 
-@admin_router.delete("/interests/{interest_id}")
-async def delete_interest(interest_id: int) -> dict:
-    from chloe.state.db import get_connection
-    conn = get_connection()
-    conn.execute("DELETE FROM interest_garden WHERE id = ?", (interest_id,))
+    # Write aversions to inner_aversions table (skip duplicates)
+    for av in extraction.get("aversions", []):
+        av = av.strip()
+        if av:
+            exists = conn.execute(
+                "SELECT 1 FROM inner_aversions WHERE LOWER(text)=LOWER(?)", (av,)
+            ).fetchone()
+            if not exists:
+                conn.execute(
+                    "INSERT INTO inner_aversions (text, tags, resolved, created_at) VALUES (?, ?, 0, ?)",
+                    (av, _json.dumps(["teo", "onboarding"]), now),
+                )
+
+    # Write open_threads as inner_questions with domain='teo' (skip duplicates)
+    for thread in extraction.get("open_threads", []):
+        thread = thread.strip()
+        if thread:
+            exists = conn.execute(
+                "SELECT 1 FROM inner_questions WHERE LOWER(text)=LOWER(?) AND domain='teo'", (thread,)
+            ).fetchone()
+            if not exists:
+                conn.execute(
+                    "INSERT INTO inner_questions (text, domain, intensity, resolved, created_at) VALUES (?, 'teo', 0.5, 0, ?)",
+                    (thread, now),
+                )
+
+    # Create person records for extracted people and wire as third_parties for Teo
+    people_created = []
+    for person in extraction.get("people", []):
+        name = (person.get("name") or "").strip()
+        if not name:
+            continue
+        raw_rel = (person.get("relationship_class") or "acquaintance").strip().lower()
+        # Map LLM values to the DB constraint: primary / secondary / peripheral
+        rel_class = (
+            "primary"    if raw_rel in ("primary", "family", "partner") else
+            "secondary"  if raw_rel in ("secondary", "friend", "close friend", "best friend") else
+            "peripheral"
+        )
+        rel_desc = (person.get("relationship_desc") or "").strip()
+        notes = (person.get("notes") or "").strip()
+
+        # Upsert person record (skip if name already exists)
+        existing = conn.execute(
+            "SELECT id FROM persons WHERE LOWER(name)=LOWER(?)", (name,)
+        ).fetchone()
+        nicknames = [
+            n.strip() for n in (person.get("nicknames") or [])
+            if n.strip() and n.strip().lower() != name.lower()
+        ]
+        aliases_json = _json.dumps(nicknames)
+
+        if existing:
+            person_id = existing["id"]
+            # Merge new nicknames with existing (deduplicated, self-referential removed)
+            existing_aliases = _json.loads(
+                conn.execute("SELECT aliases FROM persons WHERE id=?", (person_id,))
+                .fetchone()["aliases"] or "[]"
+            )
+            merged = list(dict.fromkeys(
+                [a for a in existing_aliases if a.lower() != name.lower()] + nicknames
+            ))
+            conn.execute("UPDATE persons SET aliases=? WHERE id=?",
+                         (_json.dumps(merged), person_id))
+        else:
+            cursor = conn.execute(
+                "INSERT INTO persons (name, aliases, relationship_class, warmth, distance, is_active, created_at) "
+                "VALUES (?, ?, ?, 50.0, 50.0, 1, ?)",
+                (name, aliases_json, rel_class, now),
+            )
+            person_id = cursor.lastrowid
+            people_created.append(name)
+
+        # Add or update person_notes with the relationship description
+        if notes or rel_desc:
+            note_text = f"{rel_desc}. {notes}".strip(". ").strip()
+            conn.execute(
+                "INSERT INTO person_notes (person_id, text, created_at) VALUES (?, ?, ?)",
+                (person_id, note_text, now),
+            )
+
+        # Wire as third_party for Teo (person_id=1)
+        existing_tp = conn.execute(
+            "SELECT id FROM person_third_parties WHERE person_id=1 AND LOWER(name)=LOWER(?)",
+            (name,),
+        ).fetchone()
+        if not existing_tp:
+            conn.execute(
+                "INSERT INTO person_third_parties (person_id, name, relation) VALUES (1, ?, ?)",
+                (name, rel_desc or rel_class),
+            )
+
     conn.commit()
-    log.info("interest_deleted", id=interest_id)
-    return {"deleted": interest_id}
 
+    # Synthesize teo_read from the properly extracted statements
+    knowledge = extraction.get("knowledge_statements", [])
+    if knowledge:
+        knowledge_text = "\n".join(f"- {s}" for s in knowledge)
+        synthesis_prompt = (
+            f"You are Chloe. Here is what you now know about Teo:\n\n{knowledge_text}\n\n"
+            "Write one short paragraph in your voice about how you read him. "
+            "Not a summary of facts — your felt sense of him: his patterns, his tells, "
+            "what gives him away, what you find endearing or interesting in very specific ways. "
+            "Write like you're thinking to yourself. Two to four sentences. Be concrete."
+        )
+        try:
+            teo_read = await asyncio.wait_for(
+                client.flash_text(synthesis_prompt),
+                timeout=30,
+            ) or ""
+            teo_read = teo_read.strip()
+            if teo_read:
+                kv_set("identity:teo_read", teo_read)
+                conn.execute("UPDATE persons SET impression = ? WHERE id = 1", (teo_read[:500],))
+                conn.commit()
+        except Exception as exc:
+            log.warning("teo_read_synthesis_failed", error=str(exc))
 
-# ── Inner state (goals, wants, fears, tensions, questions, anticipations, aversions, ideas) ───
-
-_INNER_TABLES: dict[str, tuple[str, str]] = {
-    "goals":         ("inner_goals",        "id, name AS text, why, progress, status AS extra"),
-    "wants":         ("inner_wants",        "id, text, subtype AS extra, pressure, resolved"),
-    "fears":         ("inner_fears",        "id, text, '' AS extra, pressure, resolved"),
-    "tensions":      ("inner_tensions",     "id, text, '' AS extra, pressure, resolved"),
-    "questions":     ("inner_questions",    "id, text, domain AS extra, intensity AS pressure, resolved"),
-    "anticipations": ("inner_anticipations","id, text, '' AS extra, intensity AS pressure, resolved"),
-    "aversions":     ("inner_aversions",    "id, text, '' AS extra, 0.0 AS pressure, resolved"),
-    "ideas":         ("ideas",              "id, text, '' AS extra, 0.0 AS pressure, complete AS resolved"),
-    "world_beliefs": ("world_beliefs",      "id, belief AS text, topic AS extra, confidence AS pressure, 0 AS resolved"),
-}
-
-
-@admin_router.get("/inner/{kind}")
-async def list_inner_state(kind: str) -> dict:
-    if kind not in _INNER_TABLES:
-        raise HTTPException(404, "unknown inner state kind")
-    from chloe.state.db import get_connection
-    table, cols = _INNER_TABLES[kind]
-    conn = get_connection()
-    rows = conn.execute(f"SELECT {cols} FROM {table} ORDER BY id DESC").fetchall()  # noqa: S608
-    return {"kind": kind, "items": [dict(r) for r in rows]}
-
-
-@admin_router.delete("/inner/{kind}/{item_id}")
-async def delete_inner_state(kind: str, item_id: int) -> dict:
-    if kind not in _INNER_TABLES:
-        raise HTTPException(404, "unknown inner state kind")
-    from chloe.state.db import get_connection
-    table, _ = _INNER_TABLES[kind]
-    conn = get_connection()
-    conn.execute(f"DELETE FROM {table} WHERE id = ?", (item_id,))  # noqa: S608
-    conn.commit()
-    log.info("inner_state_deleted", kind=kind, id=item_id)
-    return {"deleted": item_id, "kind": kind}
+    return {
+        "knowledge_statements": len(knowledge),
+        "people_found": [p.get("name") for p in extraction.get("people", [])],
+        "people_created": people_created,
+        "traits": trait_profile,
+        "aversions": extraction.get("aversions", []),
+        "open_threads": extraction.get("open_threads", []),
+    }

@@ -61,37 +61,14 @@ async def reflect_loop():
 
 
 async def pressure_loop():
-    """Pressure decay, vitals, and affect tick — sweeps every 10 minutes."""
+    """Pressure decay loop — sweeps inner_* tables every 10 minutes."""
     from chloe.inner.pressure import decay_all_pressures
-    from chloe.affect.vitals import tick_vitals, log_snapshot
     while True:
         try:
             decay_all_pressures()
-            tick_vitals()
-            _tick_affect_dims()
-            log_snapshot()
         except Exception as e:
             log.warning("pressure_decay_error", error=str(e))
         await asyncio.sleep(600)
-
-
-def _tick_affect_dims() -> None:
-    """Advance affect dimensions based on time-of-day and recent activity residue."""
-    try:
-        from chloe.affect.dims import load as load_affect, save as save_affect, tick as affect_tick
-        from chloe.inner.residue import compute_residue
-        from chloe.state.kv import get as kv_get
-        state = load_affect()
-        residue = compute_residue()
-        last_chat = kv_get("last_chat_seen")
-        new_state = affect_tick(state, residue=residue, last_chat_seen=last_chat)
-        save_affect(new_state)
-        log.debug("affect_dims_ticked",
-                  valence=round(new_state.valence, 3),
-                  arousal=round(new_state.arousal, 3),
-                  social_pull=round(new_state.social_pull, 3))
-    except Exception as exc:
-        log.warning("affect_dims_tick_error", error=str(exc))
 
 
 async def daily_job_loop():

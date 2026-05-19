@@ -117,18 +117,10 @@ def _load_inner_state(conn) -> dict:
     tensions = conn.execute(
         "SELECT text, pressure FROM inner_tensions WHERE resolved=0 ORDER BY pressure DESC LIMIT 5"
     ).fetchall()
-    anticipations = conn.execute(
-        "SELECT text, intensity FROM inner_anticipations WHERE resolved=0 ORDER BY intensity DESC LIMIT 8"
-    ).fetchall()
-    questions = conn.execute(
-        "SELECT text, domain FROM inner_questions WHERE resolved=0 ORDER BY intensity DESC LIMIT 10"
-    ).fetchall()
     return {
         "wants": "; ".join(f"{r['text']} (p={r['pressure']:.2f})" for r in wants) or "(none)",
         "fears": "; ".join(f"{r['text']} (p={r['pressure']:.2f})" for r in fears) or "(none)",
         "tensions": "; ".join(f"{r['text']} (p={r['pressure']:.2f})" for r in tensions) or "(none)",
-        "current_anticipations": "\n".join(f"- {r['text']} (i={r['intensity']:.2f})" for r in anticipations) or "(none)",
-        "current_questions": "\n".join(f"- [{r['domain']}] {r['text']}" for r in questions) or "(none)",
     }
 
 
@@ -325,32 +317,6 @@ async def _apply_output(output: ReflectOutput) -> dict:
     return counts
 
 
-def _decay_old_anticipations(conn) -> int:
-    """Reduce intensity on unresolved anticipations older than 48h; archive those that fade to near-zero.
-
-    Each reflect cycle, anticipations that have been sitting for more than 2 days
-    lose a small amount of intensity. If intensity drops below 0.1 they are
-    archived (resolved=1) so they stop accumulating on the inner page.
-    """
-    cutoff = (_now() - timedelta(hours=48)).isoformat()
-    rows = conn.execute(
-        "SELECT id, intensity FROM inner_anticipations WHERE resolved=0 AND created_at < ?",
-        (cutoff,),
-    ).fetchall()
-    decayed = 0
-    for row in rows:
-        new_intensity = round(float(row["intensity"]) - 0.04, 4)
-        if new_intensity < 0.1:
-            conn.execute("UPDATE inner_anticipations SET resolved=1 WHERE id=?", (row["id"],))
-        else:
-            conn.execute("UPDATE inner_anticipations SET intensity=? WHERE id=?", (new_intensity, row["id"]))
-        decayed += 1
-    if decayed:
-        conn.commit()
-        log.info("anticipations_decayed", count=decayed)
-    return decayed
-
-
 def _harvest_person_moments(conn, since: str) -> int:
     """Promote high-salience episodic memories into person_moments.
 
@@ -427,8 +393,6 @@ async def run_reflect(force: bool = False) -> dict | None:
         "current_wants": inner["wants"],
         "current_fears": inner["fears"],
         "current_tensions": inner["tensions"],
-        "current_anticipations": inner["current_anticipations"],
-        "current_questions": inner["current_questions"],
         "goals": _load_goals(conn),
         "interests": _load_interests(conn),
     }
@@ -479,8 +443,7 @@ async def run_reflect(force: bool = False) -> dict | None:
     # robust — JSON dropout in one doesn't silence the other.
     inner_payload = {k: v for k, v in payload.items()
                      if k in ("recent_chat", "affect_summary", "recent_outcomes",
-                              "current_wants", "current_fears", "current_tensions",
-                              "current_anticipations", "current_questions")}
+                              "current_wants", "current_fears", "current_tensions")}
     signal_payload = {k: v for k, v in payload.items()
                       if k in ("recent_chat", "goals", "interests", "world_beliefs",
                                "affect_summary", "recent_outcomes")}
@@ -549,8 +512,6 @@ async def run_reflect(force: bool = False) -> dict | None:
     moments_added = _harvest_person_moments(conn, since=last_ts)
     if moments_added:
         log.info("reflect_moments_harvested", count=moments_added)
-
-    _decay_old_anticipations(conn)
 
     kv_set(LAST_REFLECT_KEY, _now().isoformat())
     log.info("reflect_complete", **counts, note=output.continuity_note[:80])
