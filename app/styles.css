@@ -143,6 +143,14 @@ textarea { resize: vertical; }
   letter-spacing: -0.01em; line-height: 1;
   font-style: italic;
 }
+.connected-badge {
+  font-family: 'JetBrains Mono', monospace;
+  font-style: normal; font-weight: 500; font-size: 11px;
+  letter-spacing: 0.1em; vertical-align: middle;
+  color: oklch(0.55 0.18 155);
+  border: 1px solid oklch(0.55 0.18 155 / 0.4);
+  border-radius: 4px; padding: 2px 6px; margin-left: 10px;
+}
 .letterhead .who .where {
   font-size: 13px; color: var(--ink-mute);
   letter-spacing: 0.04em; text-transform: uppercase;
