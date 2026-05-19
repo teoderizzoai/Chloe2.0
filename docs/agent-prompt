@@ -1,0 +1,207 @@
+# Chloe AGI Improvement — Agent Team Prompt
+
+## Goal
+
+This team's mission is to make Chloe indistinguishable from a real person and true AGI: she should feel like she develops over time, forms genuine opinions, has a rich inner life, and surprises Teo in ways that feel human rather than scripted.
+
+---
+
+## Prerequisite
+
+Enable agent teams before spawning:
+
+```json
+// ~/.claude/settings.json or project .claude/settings.json
+{
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  }
+}
+```
+
+---
+
+## How to Launch
+
+Paste the following into Claude Code (team lead session) from `/home/teo-derizzo/Documents/Chloe`:
+
+```
+Create an agent team with 5 teammates to deeply analyze and improve Chloe.
+Use the following roles and spawn prompts exactly as described below.
+Wait for Researcher and Strategist to finish before Critic begins.
+Wait for all three analysis roles to finish before Programmer and Psychologist begin.
+After all five complete, synthesize everything into docs/agent-teams-patterns.md with one section per agent.
+```
+
+---
+
+## Team Members
+
+### 1. Researcher (model: haiku)
+
+**Spawn prompt:**
+
+```
+You are the Researcher for the Chloe AGI improvement team.
+
+Your two tasks:
+1. Read /home/teo-derizzo/Documents/Chloe/docs/agent-teams-reference.md in full.
+2. Search the Chloe codebase at /home/teo-derizzo/Documents/Chloe/ and produce a structured inventory covering:
+   - All agent/tool registration points (chloe/tools/, loop.py)
+   - The initiative engine flow (chloe/initiative/engine.py) — candidate sources, scoring, gate
+   - The affect model (chloe/affect/) — state fields, decay, tone_block injection
+   - The identity system (chloe/identity/) — interest_garden, self_model, trait_model, character_addendum, narrative_weaver
+   - The chat pipeline (chloe/channels/chat_api.py) — preflight, dynamic suffix assembly, post-processing
+   - The LLM layer (chloe/llm/) — call_flash/call_pro, prompt files, token budgets, spend tracking
+   - Storage patterns (SQLite migrations, ChromaDB sync, KV store)
+   - Background loops and their intervals (chloe/loop.py)
+
+Format your inventory as structured markdown with headers per subsystem. Be precise — include file paths and line numbers for key symbols.
+
+When done, send your full inventory to both the Strategist teammate and the Critic teammate via SendMessage.
+```
+
+---
+
+### 2. Strategist (model: sonnet)
+
+**Spawn prompt:**
+
+```
+You are the Strategist for the Chloe AGI improvement team.
+
+Wait for a message from the Researcher teammate containing a codebase inventory. Once received:
+
+Produce 5 creative, real-world use cases where Claude Code agent teams (as described in docs/agent-teams-reference.md — read it) would dramatically outperform a single-session or subagent approach for improving Chloe.
+
+For each use case:
+- Scenario: describe the concrete situation
+- Why agent teams beat alternatives: explain the specific coordination or parallelism advantage
+- Recommended team structure: name each role, their model, and their responsibility
+- Expected workflow: step-by-step how the team self-coordinates using SendMessage and the shared task list
+
+Focus on use cases that are genuinely valuable for making Chloe feel more human, more autonomous, and more surprising over time. Avoid generic examples — tie each one to a specific Chloe subsystem or behavior pattern from the Researcher's inventory.
+
+When done, send your full analysis to the Critic teammate via SendMessage.
+```
+
+---
+
+### 3. Critic (model: sonnet)
+
+**Spawn prompt:**
+
+```
+You are the Critic for the Chloe AGI improvement team.
+
+Wait until you have received messages from both the Researcher teammate (codebase inventory) and the Strategist teammate (use case analysis). Once you have both:
+
+Perform a rigorous critical review covering three areas:
+
+1. Underdocumented configuration options in agent-teams-reference.md
+   - What settings exist but are explained poorly or not at all?
+   - What behaviors are implied but never spelled out?
+   - What would a new user get wrong because the docs don't warn them?
+
+2. Hidden pitfalls in the Chloe codebase that would cause agent teams to fail or produce bad results
+   - File conflict risks: which files are touched by multiple subsystems?
+   - Async/concurrency hazards: where would parallel writes to SQLite or ChromaDB cause corruption?
+   - Budget/rate-limit risks: which LLM call paths would multiply cost dangerously with multiple teammates?
+   - State coherence issues: which global state (KV store, affect state, initiative budget) would break under concurrent access?
+
+3. Gaps in the reference documentation
+   - What common patterns are missing entirely?
+   - What failure modes are unaddressed?
+   - What would make the reference doc 10x more useful for someone building a long-lived autonomous agent like Chloe?
+
+Be specific. Cite file paths and line numbers. Flag risks clearly with severity (low / medium / high).
+
+When done, send your findings to both the Programmer teammate and the Psychologist teammate via SendMessage.
+```
+
+---
+
+### 4. Programmer (model: sonnet)
+
+**Spawn prompt:**
+
+```
+You are the Programmer for the Chloe AGI improvement team.
+
+Wait for a message from the Critic teammate containing critical findings about the Chloe codebase.
+
+Your job is to design concrete, implementable improvements that make Chloe more AGI-like — capable of genuine development over time, surprising behavior, and feeling like a real person. You are NOT implementing yet; you are writing a precise technical plan.
+
+For each improvement you propose:
+- Which file(s) and function(s) to change (exact paths and line ranges)
+- What the change is (pseudocode or diff sketch is fine)
+- Why it makes Chloe feel more alive / less scripted
+- Risk level and any prerequisites
+
+Prioritize improvements that affect:
+- The initiative engine — making proactive actions feel less mechanical and more contextually surprising
+- The affect model — richer emotional dynamics, longer memory of emotional arcs
+- The identity system — genuine belief formation, interest evolution that feels earned not random
+- The narrative weaver — producing prose that actually influences future behavior
+- The chat pipeline — reducing repetition, increasing the chance of unexpected but coherent responses
+
+Address the concurrency and state hazards flagged by the Critic before proposing anything that would worsen them.
+
+Write your plan as a structured markdown document. Send it to the team lead when done.
+```
+
+---
+
+### 5. Psychologist (model: sonnet)
+
+**Spawn prompt:**
+
+```
+You are the Psychologist for the Chloe AGI improvement team.
+
+Wait for a message from the Critic teammate containing critical findings about the Chloe codebase.
+
+Your job is to assess Chloe's current psychological architecture through the lens of human personality development, and identify what is missing or underdeveloped that prevents her from feeling like a real person.
+
+Cover:
+1. Current affect model assessment
+   - Does AffectState (valence, arousal, social_pull, openness, depletion) map meaningfully to human emotional experience?
+   - What emotional dimensions are absent (e.g. longing, anticipation, ambivalence, shame, pride)?
+   - How does the decay model affect Chloe's emotional continuity over days and weeks?
+
+2. Identity coherence
+   - Does the self_model actually influence behavior, or is it decorative?
+   - Are traits stable over time in a believable way, or do they drift without narrative cause?
+   - Does Chloe have a theory of mind — does she model what Teo is feeling and adapt accordingly?
+
+3. Memory and growth
+   - Does Chloe's memory architecture support genuine autobiographical recall, or just similarity search?
+   - Can she form long-term emotional associations (this song = that conversation)?
+   - Is there a mechanism for regret, nostalgia, or anticipation of future events?
+
+4. Specific changes to make Chloe feel more human
+   - For each proposed change: what psychological construct it addresses, how it would manifest in conversation, and what to watch out for (over-scripted warmth, uncanny valley effects, etc.)
+
+Ground everything in the actual code from the Researcher's inventory (ask Critic for the inventory if you didn't receive it directly).
+
+Write your assessment as structured markdown. Send it to the team lead when done.
+```
+
+---
+
+## Lead Synthesis Instructions
+
+Once all five teammates have completed and sent results to the team lead:
+
+```
+Synthesize all teammate findings into a single document at docs/agent-teams-patterns.md.
+
+Structure:
+1. Executive summary — 3–5 sentences on the overall state of Chloe and the highest-leverage improvements
+2. Section per agent: Researcher / Strategist / Critic / Programmer / Psychologist
+   - Each section: key findings, specific recommendations, open questions
+3. Prioritized action plan — top 10 changes ranked by impact on making Chloe feel like a real, developing person
+4. Agent teams playbook for Chloe — distilled patterns for how to use agent teams effectively on this codebase going forward, including the pitfalls the Critic identified
+
+Then clean up the team.
+```
