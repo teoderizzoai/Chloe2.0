@@ -201,7 +201,7 @@ function Letterhead({ data, userName, onLogout }) {
     <header className="letterhead">
       <Avatar size="sm" />
       <div className="who">
-        <h1>Chloe</h1>
+        <h1>Chloe <span className="connected-badge">CONNECTED</span></h1>
         <div className="where">
           {metaParts.map((p, i) => <span key={i} className="bullet">{p}</span>)}
         </div>
