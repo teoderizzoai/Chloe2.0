@@ -156,7 +156,7 @@
   border-radius: 16px 16px 4px 16px;
 }
 .bubble.chloe {
-  background: var(--surface2);
+  background: oklch(92% 0.04 355);
   color: var(--text);
   border-radius: 16px 16px 16px 4px;
 }
