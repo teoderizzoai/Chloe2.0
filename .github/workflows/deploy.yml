@@ -8,6 +8,25 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
+      - name: Write .env to server
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: 89.167.117.96
+          username: ${{ secrets.HETZNER_USER }}
+          key: ${{ secrets.HETZNER_SSH_KEY }}
+          script: |
+            mkdir -p /opt/chloe
+            printf 'GEMINI_API_KEY=%s\nCHROMA_PATH=/opt/chloe/chroma_db\nBRAVE_API_KEY=%s\nGOOGLE_CLIENT_ID=%s\nGOOGLE_CLIENT_SECRET=%s\nSPOTIFY_CLIENT_ID=%s\nSPOTIFY_CLIENT_SECRET=%s\nCHLOE_MASTER_KEY_INLINE=%s\n' \
+              '${{ secrets.GEMINI_API_KEY }}' \
+              '${{ secrets.BRAVE_API_KEY }}' \
+              '${{ secrets.GOOGLE_CLIENT_ID }}' \
+              '${{ secrets.GOOGLE_CLIENT_SECRET }}' \
+              '${{ secrets.SPOTIFY_CLIENT_ID }}' \
+              '${{ secrets.SPOTIFY_CLIENT_SECRET }}' \
+              '${{ secrets.CHLOE_MASTER_KEY_INLINE }}' \
+              > /opt/chloe/.env
+            chmod 600 /opt/chloe/.env
+
       - name: Deploy to Hetzner
         uses: appleboy/ssh-action@v1.2.0
         with:
